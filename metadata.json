@@ -1,0 +1,6 @@
+{
+  "name": "Map Coordinate CRUD",
+  "description": "An elegant, interactive map coordinate and location manager with open maps, categories, search, and full CRUD operations.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

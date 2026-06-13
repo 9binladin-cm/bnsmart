@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "landmark": {
+      "title": "Landmark",
+      "description": "Thai landmark and coordinate bookmarks synchronized with Firebase",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "type": { "type": "string" },
+        "googleMapsLink": { "type": "string" },
+        "address": {
+          "type": "object",
+          "properties": {
+            "soi": { "type": "string" },
+            "moo": { "type": "string" },
+            "tambon": { "type": "string" },
+            "amphoe": { "type": "string" }
+          }
+        },
+        "note": { "type": "string" },
+        "updatedAt": { "type": "object" }
+      },
+      "required": ["name", "lat", "lng", "type", "address"]
+    }
+  },
+  "firestore": {
+    "/landmarks/{landmarkId}": {
+      "schema": "landmark",
+      "description": "Managed collection of landmarks"
+    }
+  }
+}

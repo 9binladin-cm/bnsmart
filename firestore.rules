@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /landmarks/{document} {
+      // Production: อนุญาตให้อ่านได้ทุกคน
+      allow read: if true;
+      
+      // การเขียนต้องมีฟิลด์บังคับครบถ้วน ป้องกันคนยิง API ขยะเข้ามา
+      allow create, update: if 
+        request.resource.data.keys().hasAll(['name', 'lat', 'lng', 'type', 'address']) &&
+        request.resource.data.name is string && request.resource.data.name.size() > 0 &&
+        request.resource.data.lat is number &&
+        request.resource.data.lng is number;
+        
+      // การลบ (ในสภาวะจริงควรให้เฉพาะ Admin, อันนี้เปิดไว้ให้ทำงานตาม Flow เดิมได้ก่อน)
+      allow delete: if true; 
+    }
+
+    match /locations/{document} {
+      allow read, write: if true;
+    }
+  }
+}
