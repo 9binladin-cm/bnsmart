@@ -125,3 +125,16 @@ body {
 .animate-fadeIn {
   animation: fadeIn 0.2s ease-out forwards;
 }
+
+@keyframes routePathAnimation {
+  from {
+    stroke-dashoffset: 20;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-route-path {
+  animation: routePathAnimation 1s linear infinite;
+}

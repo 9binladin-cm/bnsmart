@@ -5,6 +5,45 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import L from 'leaflet';
+
+// PATCH LEAFLET TO PREVENT CRASH
+const originalLatLng = L.latLng;
+(L as any).latLng = function (...args: any[]) {
+  try {
+    let lat = args[0], lng = args[1];
+    if (Array.isArray(args[0])) { lat = args[0][0]; lng = args[0][1]; }
+    else if (typeof args[0] === 'object' && args[0] !== null) { lat = args[0].lat; lng = args[0].lng; }
+    if (isNaN(lat) || isNaN(lng) || lat === undefined || lng === undefined) {
+      console.warn('Leaflet prevented NaN crash. args:', args);
+      return originalLatLng(0, 0);
+    }
+    return originalLatLng.apply(this, args);
+  } catch(e) {
+    console.warn("Leaflet patch caught error", e, args);
+    return originalLatLng(0, 0);
+  }
+};
+
+const OriginalLatLngClass = L.LatLng;
+(L as any).LatLng = function (lat: any, lng: any, alt?: any) {
+  if (isNaN(lat) || isNaN(lng)) {
+    console.warn("Leaflet LatLng constructor prevented NaN crash:", lat, lng);
+    return new OriginalLatLngClass(0, 0, alt);
+  }
+  return new OriginalLatLngClass(lat, lng, alt);
+}
+Object.assign((L as any).LatLng, OriginalLatLngClass);
+(L as any).LatLng.prototype = OriginalLatLngClass.prototype;
+
+const originalMarker = L.marker;
+(L as any).marker = function (latlng: any, options: any) {
+    try {
+        return originalMarker(latlng, options);
+    } catch(e) {
+        console.warn("Leaflet marker prevented NaN crash. latlng:", latlng);
+        return originalMarker([0,0], options);
+    }
+};
 import { 
   MapPin, 
   Search, 
@@ -23,10 +62,13 @@ import {
   Navigation, 
   MapPinned, 
   Sparkles,
+  Lock,
+  Unlock,
   Info,
   Layers,
   Heart,
   ChevronRight,
+  Copy,
   MapIcon,
   LayoutDashboard,
   ClipboardList,
@@ -37,27 +79,30 @@ import {
   CheckCircle2,
   FileCheck2,
   AlertCircle,
-  QrCode
+  QrCode,
+  Building2,
+  Home,
+  Users,
+  Clock
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { motion, AnimatePresence } from 'motion/react';
+import { BookmarkLocation } from './types';
+import { TableView } from './components/TableView';
 import { db, isFirebaseConfigured, collection, setDoc, deleteDoc, doc, onSnapshot, addDoc, updateDoc, serverTimestamp } from './firebase';
 
-// Type definitions for map coordinate bookmark locations
-interface BookmarkLocation {
-  id: string;
-  name: string;
-  lat: number;
-  lng: number;
-  category: 'Village' | 'Community' | 'Office' | 'Condo';
-  notes: string;
-  googleMapLink?: string;
-  soi?: string;      // ซอย
-  moo?: string;      // หมู่ที่
-  tambon?: string;   // ตำบล/แขวง
-  amphoe?: string;   // เขต/อำเภอ
-  createdAt: number;
-}
+// 52 Subdistricts of Nonthaburi (excluding duplicate names, 51 unique names sorted alphabetically)
+const NONTHABURI_TAMBONS = [
+  "เกาะเกร็ด", "ขุนศรี", "คลองขวาง", "คลองข่อย", "คลองเกลือ", "คลองพระอุดม",
+  "ตลาดขวัญ", "ทวีวัฒนา", "ท่าทราย", "ท่าอิฐ", "บางกระสอ", "บางกร่าง",
+  "บางกรวย", "บางขนุน", "บางขุนกอง", "บางคูรัด", "บางคูเวียง", "บางเขน",
+  "บางตะไนย์", "บางตลาด", "บางบัวทอง", "บางพูด", "บางไผ่", "บางพลับ",
+  "บางม่วง", "บางแม่นาง", "บางรักน้อย", "บางรักพัฒนา", "บางรักใหญ่", "บางเลน",
+  "บางศรีเมือง", "บางสีทอง", "บางใหญ่", "บ้านใหม่", "ปากเกร็ด", "ปลายบาง",
+  "พิมลราช", "มหาสวัสดิ์", "ราษฎร์นิยม", "ละหาร", "ลำโพ", "วัดชลอ",
+  "ศาลากลาง", "สวนใหญ่", "เสาธงหิน", "โสนลอย", "หนองเพรางาย", "อ้อมเกร็ด",
+  "ไทรน้อย", "ไทรใหญ่", "ไทรม้า"
+].sort((a, b) => a.localeCompare(b, "th"));
 
 // Initial seed data - Beautiful Landmark bookmarks around Thailand
 const INITIAL_LANDMARKS: BookmarkLocation[] = [];
@@ -86,13 +131,34 @@ const TILE_LAYERS = {
   }
 };
 
+const getCategorySvgString = (category: string) => {
+  let innerPath = '';
+  switch (category) {
+    case 'Village': 
+      innerPath = '<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>'; 
+      break;
+    case 'Community': 
+      innerPath = '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'; 
+      break;
+    case 'Office': 
+      innerPath = '<rect width="16" height="20" x="4" y="2" rx="2" ry="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01"/><path d="M16 6h.01"/><path d="M12 6h.01"/><path d="M12 10h.01"/><path d="M12 14h.01"/><path d="M16 10h.01"/><path d="M16 14h.01"/><path d="M8 10h.01"/><path d="M8 14h.01"/>'; 
+      break;
+    case 'Condo': 
+      innerPath = '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>'; 
+      break;
+    default: 
+      innerPath = '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>'; 
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${innerPath}</svg>`;
+};
+
 const getCategoryEmoji = (category: string) => {
   switch (category) {
-    case 'Village': return '🏘️';
-    case 'Community': return '🤝';
-    case 'Office': return '🏢';
-    case 'Condo': return '🏙️';
-    default: return '📍';
+    case 'Village': return <Home size="1em" />;
+    case 'Community': return <Users size="1em" />;
+    case 'Office': return <Building2 size="1em" />;
+    case 'Condo': return <MapPinned size="1em" />;
+    default: return <MapPin size="1em" />;
   }
 };
 
@@ -108,7 +174,7 @@ const getCategoryNameTh = (category: string) => {
 
 export default function App() {
   // Navigation / View state
-  const [currentView, setCurrentView] = useState<'dashboard' | 'map'>('dashboard');
+  const [currentView, setCurrentView] = useState<'dashboard' | 'map' | 'table'>('dashboard');
   
   // Mobile responsive and device auto-detection states
   const [isMobile, setIsMobile] = useState(false);
@@ -124,13 +190,41 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
+  const [tambonFilter, setTambonFilter] = useState<string>('All');
+  const [mooFilter, setMooFilter] = useState<string>('All');
+  const [sortMode, setSortMode] = useState<'date' | 'name' | 'distance'>('date');
   const [activeLocationId, setActiveLocationId] = useState<string | null>(null);
 
+  // Distance calculating helper
+  const calculateDistanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371; // Earth radius km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLng/2) * Math.sin(dLng/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
+
   // Map settings state
-  const [tileStyle, setTileStyle] = useState<keyof typeof TILE_LAYERS>('dark'); // default dark map
+  const [tileStyle, setTileStyle] = useState<keyof typeof TILE_LAYERS>('streets'); // default street map
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
   const [isLocating, setIsLocating] = useState(false);
-  const [showTileMenu, setShowTileMenu] = useState(false);
+  const notifiedLocationsRef = useRef<Set<string>>(new Set());
+  const notificationPermissionRef = useRef<NotificationPermission | null>(
+    typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : null
+  );
+
+  
+  // 📍 Route Planning State
+  const [routePoints, setRoutePoints] = useState<BookmarkLocation[]>([]);
+  const [routePolyline, setRoutePolyline] = useState<[number, number][] | null>(null);
+  const [routeDistance, setRouteDistance] = useState<number | null>(null);
+  const [routeDuration, setRouteDuration] = useState<number | null>(null);
+  const [isRouteMode, setIsRouteMode] = useState(false);
+  const routeLayerRef = useRef<L.Polyline | null>(null);
 
   // Manual fast fly-to input state
   const [quickCoordinatesInput, setQuickCoordinatesInput] = useState('');
@@ -147,16 +241,71 @@ export default function App() {
   const [formNotes, setFormNotes] = useState('');
   const [formLat, setFormLat] = useState<string | number>('');
   const [formLng, setFormLng] = useState<string | number>('');
+  const [formCoords, setFormCoords] = useState<string>('');
   const [formGoogleMapLink, setFormGoogleMapLink] = useState('');
   const [formSoi, setFormSoi] = useState('');
   const [formMoo, setFormMoo] = useState('');
   const [formTambon, setFormTambon] = useState('');
   const [formAmphoe, setFormAmphoe] = useState('');
 
+  // 🔒 States สำหรับจดจำการล็อกฟิลด์ข้อมูล
+  const [lockType, setLockType] = useState(false);
+  const [lockSoi, setLockSoi] = useState(false);
+  const [lockMoo, setLockMoo] = useState(false);
+  const [lockTambon, setLockTambon] = useState(false);
+  const [lockAmphoe, setLockAmphoe] = useState(false);
+  const [lockGps, setLockGps] = useState(false);
+
+  // Sync GPS to Form if lockGps is active
+  useEffect(() => {
+    if (lockGps && userLocation && (isCreating || isEditing)) {
+      setFormLat(userLocation.lat);
+      setFormLng(userLocation.lng);
+      fetchThaiAddressDetails(userLocation.lat, userLocation.lng);
+    }
+  }, [userLocation, lockGps, isCreating, isEditing]);
+
   // File imports state
   const [fileImportSuccess, setFileImportSuccess] = useState<string | null>(null);
   const [fileImportError, setFileImportError] = useState<string | null>(null);
   const [copiedCoords, setCopiedCoords] = useState<boolean>(false);
+
+  // 🍞 Toast Notification System
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ message, type });
+  };
+
+  // 🛡️ Form Stability Guard (Prevent accidental refresh)
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isCreating || isEditing) {
+        const message = 'คุณมีการกรอกข้อมูลลอยอยู่ การรีเฟรชหน้าจะทำให้ข้อมูลที่ยังไม่บันทึกหายไป ต้องการดำเนินการต่อหรือไม่?';
+        e.preventDefault();
+        e.returnValue = message;
+        return message;
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isCreating, isEditing]);
+
+  // 📋 Copy to Clipboard Helper
+  const handleCopyLocation = (loc: BookmarkLocation) => {
+    const text = `📌 ${loc.name}\n📍 พิกัด: ${loc.lat}, ${loc.lng}\n🏠 ที่อยู่: ${loc.moo ? `ม.${loc.moo} ` : ''}${loc.soi ? `ซ.${loc.soi} ` : ''}${loc.tambon || ''}\n📝 บันทึก: ${loc.notes || '-'}`;
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('คัดลอกรายละเอียดข้อมูลแล้ว', 'success');
+    }).catch(() => {
+      showToast('ไม่สามารถคัดลอกข้อมูลได้', 'error');
+    });
+  };
 
   // QR Code generator state
   const [activeQrCodeUrl, setActiveQrCodeUrl] = useState<string | null>(null);
@@ -164,6 +313,7 @@ export default function App() {
 
   // Edit/Save Confirmation states
   const [showSaveConfirmModal, setShowSaveConfirmModal] = useState<boolean>(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
   // 3. Leaflet Ref Holders
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -174,6 +324,7 @@ export default function App() {
   const markersLayerGroupRef = useRef<L.LayerGroup | null>(null);
   const tempMarkerRef = useRef<L.Marker | null>(null);
   const userLocationMarkerRef = useRef<L.Marker | null>(null);
+  const watchIdRef = useRef<number | null>(null);
 
   // 4b. Firebase Real-Time Synchronization Listener (Syncing through landmarks collection)
   useEffect(() => {
@@ -191,21 +342,16 @@ export default function App() {
 
         const latRaw = data.lat;
         const lngRaw = data.lng;
-        let latVal = 13.7563; // defaults to central Thailand if invalid
-        if (typeof latRaw === 'number') {
-          latVal = isNaN(latRaw) ? 13.7563 : latRaw;
-        } else if (typeof latRaw === 'string') {
-          const parsed = parseFloat(latRaw);
-          latVal = isNaN(parsed) ? 13.7563 : parsed;
+        const plat = parseFloat(String(latRaw));
+        const plng = parseFloat(String(lngRaw));
+        
+        if (isNaN(plat) || isNaN(plng) || !isFinite(plat) || !isFinite(plng)) {
+          console.error('CRITICAL: Skipping marker with invalid coordinates:', docSnap.id, latRaw, lngRaw);
+          return;
         }
 
-        let lngVal = 100.5018;
-        if (typeof lngRaw === 'number') {
-          lngVal = isNaN(lngRaw) ? 100.5018 : lngRaw;
-        } else if (typeof lngRaw === 'string') {
-          const parsed = parseFloat(lngRaw);
-          lngVal = isNaN(parsed) ? 100.5018 : parsed;
-        }
+        let latVal = plat;
+        let lngVal = plng;
 
         list.push({
           id: docSnap.id,
@@ -233,6 +379,18 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // 4c. Real-time location watch cleanup & Auto-start on mount
+  useEffect(() => {
+    // Automatically try to get GPS on mount to satisfy "access current position real-time automatically every time"
+    handleGetMyGPS();
+    
+    return () => {
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+    };
+  }, []);
+
   // Auto-detect mobile devices and responsive scaling
   useEffect(() => {
     const handleResize = () => {
@@ -249,13 +407,28 @@ export default function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // 5. Filter Locations list
+  // Helper for filter options
+  const uniqueTambons = useMemo(() => {
+    const list = locations.map(l => l.tambon).filter(Boolean);
+    return Array.from(new Set(list)).sort((a, b) => (a as string).localeCompare(b as string, 'th'));
+  }, [locations]);
+
+  const uniqueMoos = useMemo(() => {
+    const list = locations.map(l => l.moo).filter(Boolean);
+    return Array.from(new Set(list)).sort((a, b) => (a as string).localeCompare(b as string, 'th', { numeric: true }));
+  }, [locations]);
+
+  // 5. Filter and Sort Locations list
   const filteredLocations = useMemo(() => {
-    return locations.filter(loc => {
+    const filtered = locations.filter(loc => {
       const q = searchQuery.toLowerCase().trim();
+      
+      const matchCategory = categoryFilter === 'All' || loc.category === categoryFilter;
+      const matchTambon = tambonFilter === 'All' || loc.tambon === tambonFilter;
+      const matchMoo = mooFilter === 'All' || loc.moo === mooFilter;
+
       if (!q) {
-        const matchCategory = categoryFilter === 'All' || loc.category === categoryFilter;
-        return matchCategory;
+        return matchCategory && matchTambon && matchMoo;
       }
 
       // Perform address search combining Thailand address sub-fields, name, and notes, completely ignoring pin lat/lng coordinates
@@ -269,10 +442,24 @@ export default function App() {
       ].join(' ').toLowerCase();
 
       const matchSearch = addressString.includes(q);
-      const matchCategory = categoryFilter === 'All' || loc.category === categoryFilter;
-      return matchSearch && matchCategory;
+      return matchSearch && matchCategory && matchTambon && matchMoo;
     });
-  }, [locations, searchQuery, categoryFilter]);
+
+    return filtered.sort((a, b) => {
+      if (sortMode === 'name') {
+        return a.name.localeCompare(b.name, 'th');
+      }
+      if (sortMode === 'distance') {
+        if (!userLocation) return 0; // Fallback to original order if no GPS
+        const distA = calculateDistanceKm(userLocation.lat, userLocation.lng, a.lat, a.lng);
+        const distB = calculateDistanceKm(userLocation.lat, userLocation.lng, b.lat, b.lng);
+        return distA - distB;
+      }
+      // sortMode === 'date' (Default, assuming Firebase returns them ordered, or we use string comparison on id if no createdAt exists)
+      // Actually reversing gives newest first visually if appending
+      return 0; // Or write logic if createdAt is available, keeping 0 to maintain firestore order
+    });
+  }, [locations, searchQuery, categoryFilter, tambonFilter, mooFilter, sortMode, userLocation]);
 
   // Active Location detail
   const activeLocation = useMemo(() => {
@@ -329,68 +516,79 @@ export default function App() {
     if (!mapContainerRef.current) return;
 
     // Start coordinates center over Thailand or first location
-    const initialCenter: [number, number] = [13.7563, 100.5018];
+    const initialCenter: L.LatLngExpression = [13.7563, 100.5018];
     const initialZoom = 7;
 
-    // Thailand bounding box
-    const thailandBounds = L.latLngBounds(
-      L.latLng(5.5, 97.0),
-      L.latLng(20.5, 106.0)
-    );
+    try {
+      // Thailand bounding box
+      const thailandBounds = L.latLngBounds(
+        L.latLng(5.5, 97.0),
+        L.latLng(20.5, 106.0)
+      );
 
-    // Build Map instance
-    const leafletMap = L.map(mapContainerRef.current, {
-      center: initialCenter,
-      zoom: initialZoom,
-      zoomControl: false, // custom placement
-      maxBounds: thailandBounds,
-      maxBoundsViscosity: 0.8
-    });
+      // Build Map instance
+      const leafletMap = L.map(mapContainerRef.current, {
+        center: initialCenter,
+        zoom: initialZoom,
+        zoomControl: false, // custom placement
+        maxBounds: thailandBounds,
+        maxBoundsViscosity: 0.8
+      });
 
-    // Custom Zoom controls
-    L.control.zoom({
-      position: 'bottomright'
-    }).addTo(leafletMap);
+      // Custom Zoom controls
+      L.control.zoom({
+        position: 'bottomright'
+      }).addTo(leafletMap);
 
-    // Initial tile layer setup
-    const layer = L.tileLayer(TILE_LAYERS[tileStyle].url, {
-      attribution: TILE_LAYERS[tileStyle].attribution
-    }).addTo(leafletMap);
+      // Initial tile layer setup
+      const layer = L.tileLayer(TILE_LAYERS[tileStyle].url, {
+        attribution: TILE_LAYERS[tileStyle].attribution
+      }).addTo(leafletMap);
 
-    tileLayerRef.current = layer;
-    mapInstanceRef.current = leafletMap;
+      tileLayerRef.current = layer;
+      mapInstanceRef.current = leafletMap;
 
-    // Feature group layers
-    const markersGroup = L.layerGroup().addTo(leafletMap);
-    markersLayerGroupRef.current = markersGroup;
+      // Feature group layers
+      const markersGroup = L.layerGroup().addTo(leafletMap);
+      markersLayerGroupRef.current = markersGroup;
 
-    // Setup map click event to grab coordinates visually
-    leafletMap.on('click', async (e: L.LeafletMouseEvent) => {
-      if (!e || !e.latlng || isNaN(e.latlng.lat) || isNaN(e.latlng.lng)) return;
-      const clickedLat = parseFloat(e.latlng.lat.toFixed(6));
-      const clickedLng = parseFloat(e.latlng.lng.toFixed(6));
-      
-      if (isNaN(clickedLat) || isNaN(clickedLng)) return;
-      
-      setSelectedMapPoint({ lat: clickedLat, lng: clickedLng });
-      setIsCreating(true);
-      setIsEditing(false);
-      
-      // Pre-fill form fields
-      setFormName('หมุดพิกัดจัดเก็บใหม่');
-      setFormLat(clickedLat);
-      setFormLng(clickedLng);
-      setFormCategory('Village');
-      setFormNotes('');
-      setFormGoogleMapLink('');
-      setFormSoi('');
-      setFormMoo('');
-      setFormTambon('');
-      setFormAmphoe('');
+      // Setup map click event to grab coordinates visually
+      leafletMap.on('click', async (e: L.LeafletMouseEvent) => {
+        if (!e || !e.latlng) return;
+        
+        const plat = parseFloat(String(e.latlng.lat));
+        const plng = parseFloat(String(e.latlng.lng));
+        
+        if (isNaN(plat) || isNaN(plng)) return;
+        
+        const clickedLat = parseFloat(plat.toFixed(6));
+        const clickedLng = parseFloat(plng.toFixed(6));
+        
+        if (!isNaN(clickedLat) && !isNaN(clickedLng)) {
+          setSelectedMapPoint({ lat: clickedLat, lng: clickedLng });
+        }
+        setIsCreating(true);
+        setIsEditing(false);
+        
+        // Pre-fill form fields
+        setFormName('หมุดพิกัดจัดเก็บใหม่');
+        setFormLat(clickedLat);
+        setFormLng(clickedLng);
+        setFormCoords(`${clickedLat}, ${clickedLng}`);
+        if (!lockType) setFormCategory('Village');
+        setFormNotes('');
+        setFormGoogleMapLink('');
+        if (!lockSoi) setFormSoi('');
+        if (!lockMoo) setFormMoo('');
+        if (!lockTambon) setFormTambon('');
+        if (!lockAmphoe) setFormAmphoe('');
 
-      // Auto-trigger reverse geocoding on click
-      fetchThaiAddressDetails(clickedLat, clickedLng);
-    });
+        // Auto-trigger reverse geocoding on click
+        fetchThaiAddressDetails(clickedLat, clickedLng);
+      });
+    } catch (err) {
+      console.error('Leaflet initialization failed:', err);
+    }
 
     return () => {
       if (mapInstanceRef.current) {
@@ -418,22 +616,25 @@ export default function App() {
   // Custom marker generator with gorgeous HTML design (bypasses Vite leaflet icons build issue)
   const createCustomMarkerHtml = (category: string, isActive: boolean) => {
     const bgColors: Record<string, string> = {
-      Village: 'bg-emerald-500 border-emerald-100 text-white ring-emerald-400',
-      Community: 'bg-blue-500 border-blue-100 text-white ring-blue-400',
-      Office: 'bg-rose-500 border-rose-100 text-white ring-rose-400',
-      Condo: 'bg-amber-500 border-amber-100 text-white ring-amber-400',
+      Village: '#10b981', // emerald-500
+      Community: '#3b82f6', // blue-500
+      Office: '#f43f5e', // rose-500
+      Condo: '#f59e0b', // amber-500
     };
 
-    const colorScheme = bgColors[category] || bgColors.Village;
-    const activeAnimationClass = isActive 
-      ? 'scale-125 ring-4 shadow-xl z-[9999]' 
-      : 'hover:scale-110 shadow-md scale-100';
+    const color = bgColors[category] || '#ef4444';
+    const scaleClass = isActive ? 'scale-125 z-[9999]' : 'scale-100 hover:scale-110';
+    const svgIcon = getCategorySvgString(category);
 
     return `
-      <div class="relative flex items-center justify-center w-9 h-9 rounded-full border-2 transition-transform duration-300 ${colorScheme} ${activeAnimationClass}">
-        <span class="text-base select-none leading-none">${getCategoryEmoji(category)}</span>
-        <!-- Selected halo effect -->
-        ${isActive ? '<span class="absolute inline-flex h-full w-full rounded-full bg-blue-400/30 animate-ping -z-10"></span>' : ''}
+      <div class="relative flex flex-col items-center justify-center transition-transform duration-300 transform origin-bottom ${scaleClass}" style="width: 36px; height: 44px; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3));">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="36" height="36" style="fill: ${color}; stroke: white; stroke-width: 1.5px; overflow: visible;">
+          <path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/>
+        </svg>
+        <div class="absolute" style="top: 8px; width: 14px; height: 14px; color: white;">
+          ${svgIcon}
+        </div>
+        ${isActive ? '<div class="absolute -bottom-1 w-6 h-2 bg-black/30 rounded-[100%] blur-[2px] -z-10 animate-pulse"></div>' : ''}
       </div>
     `;
   };
@@ -447,10 +648,15 @@ export default function App() {
 
     // Iterate filter locations
     filteredLocations.forEach(loc => {
-      // Safety validation
-      if (typeof loc.lat !== 'number' || typeof loc.lng !== 'number' || isNaN(loc.lat) || isNaN(loc.lng)) {
+      // Strict coordinate validation
+      const nLat = parseFloat(String(loc.lat));
+      const nLng = parseFloat(String(loc.lng));
+      
+      if (isNaN(nLat) || isNaN(nLng) || !isFinite(nLat) || !isFinite(nLng)) {
+        console.warn('Skipping marker with invalid coordinates:', loc.id, loc.lat, loc.lng);
         return;
       }
+
       const isCurrentlyActive = loc.id === activeLocationId;
       
       const customHtml = createCustomMarkerHtml(loc.category, isCurrentlyActive);
@@ -462,49 +668,67 @@ export default function App() {
         popupAnchor: [0, -18]
       });
 
-      const elementMarker = L.marker([loc.lat, loc.lng], { icon }).addTo(markersLayerGroupRef.current!);
+      /* Strict marker coordinate normalization to prevent crashes */
+      const safeNLat = (isNaN(nLat) || !isFinite(nLat)) ? 0 : nLat;
+      const safeNLng = (isNaN(nLng) || !isFinite(nLng)) ? 0 : nLng;
 
-      // Popup with Thailand Address details and Google Map link navigation
-      elementMarker.bindPopup(`
+      try {
+        const elementMarker = L.marker([safeNLat, safeNLng], { icon }).addTo(markersLayerGroupRef.current!);
+
+        // Popup with Thailand Address details and Google Map link navigation
+        elementMarker.bindPopup(`
         <div class="p-2 min-w-[210px] font-sans">
           <div class="flex items-center gap-1.5 font-bold text-sm text-slate-800">
-            <span class="text-lg">${getCategoryEmoji(loc.category)}</span>
+            <div class="w-5 h-5 text-slate-700">${getCategorySvgString(loc.category)}</div>
             <span class="truncate pr-1">${loc.name}</span>
           </div>
           <div class="text-[10px] text-slate-400 font-mono mt-0.5">${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}</div>
           
           <div class="text-[11px] text-slate-700 bg-slate-50 p-1.5 rounded border border-slate-100 mt-2 space-y-0.5">
             <div><span class="text-slate-400">ซอย:</span> ${loc.soi || '-'} <span class="text-slate-400 pl-1.5">หมู่:</span> ${loc.moo || '-'}</div>
-            <div><span class="text-slate-400">ตำบล/แขวง:</span> ${loc.tambon || '-'}</div>
-            <div><span class="text-slate-400">เขต/อำเภอ:</span> ${loc.amphoe || '-'}</div>
+            <div><span class="text-slate-400">ตำบล:</span> ${loc.tambon || '-'}</div>
           </div>
 
           <div class="text-xs text-slate-600 mt-2 border-t border-slate-100 pt-1.5 leading-relaxed italic">
             "${loc.notes || 'ยังไม่ระบุรายละเอียดบันทึก...'}"
           </div>
-          <div class="flex justify-between items-center mt-3 pt-2 border-t border-slate-100">
-            <span class="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 font-bold">
-              ${getCategoryNameTh(loc.category)}
-            </span>
-            ${loc.googleMapLink ? `
-              <a href="${loc.googleMapLink}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-blue-600 font-bold hover:underline">
-                🔗 ลิงก์แผนที่
-              </a>
-            ` : `
-              <a href="https://www.google.com/maps/dir/?api=1&destination=${loc.lat},${loc.lng}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-emerald-600 font-bold hover:underline">
-                🚗 เส้นทางนำทาง
-              </a>
-            `}
+          <div class="flex flex-col gap-1.5 mt-3 pt-2 border-t border-slate-100">
+            <div class="flex justify-between items-center">
+              <span class="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 font-bold">
+                ${getCategoryNameTh(loc.category)}
+              </span>
+              <button 
+                onclick="if(window.addToRouteById) { window.addToRouteById('${loc.id}'); }"
+                class="flex items-center gap-1 text-[9px] bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-sm hover:bg-blue-700 transition cursor-pointer"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg> เพิ่มลงเส้นทาง
+              </button>
+            </div>
+            <div class="flex justify-between items-center">
+              ${loc.googleMapLink ? `
+                <a href="${loc.googleMapLink}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-[10px] text-blue-600 font-bold hover:underline">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> ลิงก์แผนที่
+                </a>
+              ` : `
+                <a href="https://www.google.com/maps/dir/?api=1&destination=${loc.lat},${loc.lng}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-[10px] text-emerald-600 font-bold hover:underline">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg> นำทาง
+
+                </a>
+              `}
+            </div>
           </div>
         </div>
       `);
 
-      // Keep tracked on click
-      elementMarker.on('click', () => {
-        setActiveLocationId(loc.id);
-        setIsCreating(false);
-        setIsEditing(false);
-      });
+        // Keep tracked on click
+        elementMarker.on('click', () => {
+          setActiveLocationId(loc.id);
+          setIsCreating(false);
+          setIsEditing(false);
+        });
+      } catch (err) {
+        console.error('Failed to create location marker:', err);
+      }
     });
   }, [filteredLocations, activeLocationId]);
 
@@ -518,24 +742,35 @@ export default function App() {
       tempMarkerRef.current = null;
     }
 
-    if (selectedMapPoint && typeof selectedMapPoint.lat === 'number' && typeof selectedMapPoint.lng === 'number' && !isNaN(selectedMapPoint.lat) && !isNaN(selectedMapPoint.lng)) {
-      const tempHtml = `
+    if (selectedMapPoint) {
+      const pLat = parseFloat(String(selectedMapPoint.lat));
+      const pLng = parseFloat(String(selectedMapPoint.lng));
+
+      if (!isNaN(pLat) && !isNaN(pLng) && isFinite(pLat) && isFinite(pLng)) {
+        const tempHtml = `
         <div class="relative flex items-center justify-center w-10 h-10 rounded-full border-2 border-dashed border-red-500 bg-red-50 text-red-500 shadow-lg scale-110 animate-bounce">
-          <span class="text-lg">🎯</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="2"/></svg>
           <span class="absolute inline-flex h-full w-full rounded-full bg-red-400/20 animate-pulse -z-10"></span>
         </div>
       `;
-      const icon = L.divIcon({
-        html: tempHtml,
-        className: 'temp-marker-placement',
-        iconSize: [40, 40],
-        iconAnchor: [20, 20]
-      });
+        const icon = L.divIcon({
+          html: tempHtml,
+          className: 'temp-marker-placement',
+          iconSize: [40, 40],
+          iconAnchor: [20, 20]
+        });
 
-      const tempMarker = L.marker([selectedMapPoint.lat, selectedMapPoint.lng], { icon })
-        .addTo(mapInstanceRef.current);
-      
-      tempMarkerRef.current = tempMarker;
+        try {
+          const safePLat = (isNaN(pLat) || !isFinite(pLat)) ? 0 : pLat;
+          const safePLng = (isNaN(pLng) || !isFinite(pLng)) ? 0 : pLng;
+          const tempMarker = L.marker([safePLat, safePLng], { icon })
+            .addTo(mapInstanceRef.current);
+          
+          tempMarkerRef.current = tempMarker;
+        } catch (err) {
+          console.error('Failed to create temp marker:', err);
+        }
+      }
     }
   }, [selectedMapPoint]);
 
@@ -548,72 +783,284 @@ export default function App() {
       userLocationMarkerRef.current = null;
     }
 
-    if (userLocation && typeof userLocation.lat === 'number' && typeof userLocation.lng === 'number' && !isNaN(userLocation.lat) && !isNaN(userLocation.lng)) {
-      const radarHtml = `
+    if (userLocation) {
+      const uLat = parseFloat(String(userLocation.lat));
+      const uLng = parseFloat(String(userLocation.lng));
+
+      if (!isNaN(uLat) && !isNaN(uLng) && isFinite(uLat) && isFinite(uLng)) {
+        const radarHtml = `
         <div class="relative flex items-center justify-center w-8 h-8 rounded-full border-2 border-white bg-blue-500 shadow-xl ring-4 ring-blue-500/30">
           <div class="w-3 h-3 bg-white rounded-full"></div>
           <span class="absolute inline-flex h-full w-full rounded-full bg-blue-400/40 animate-ping -z-10"></span>
         </div>
       `;
-      const icon = L.divIcon({
-        html: radarHtml,
-        className: 'user-radar-pulsate',
-        iconSize: [32, 32],
-        iconAnchor: [16, 16]
-      });
+        const icon = L.divIcon({
+          html: radarHtml,
+          className: 'user-radar-pulsate',
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
 
-      const uMarker = L.marker([userLocation.lat, userLocation.lng], { icon })
-        .addTo(mapInstanceRef.current)
-        .bindPopup('<strong class="text-xs">📍 คุณอยู่แถวนี้</strong>');
-      
-      userLocationMarkerRef.current = uMarker;
+        try {
+          const safeULat = (isNaN(uLat) || !isFinite(uLat)) ? 0 : uLat;
+          const safeULng = (isNaN(uLng) || !isFinite(uLng)) ? 0 : uLng;
+          const popupContent = `
+            <div class="text-center p-1 font-sans min-w-[120px]">
+              <div class="text-[11px] font-bold text-slate-800 mb-2">📍 ตำแหน่งปัจจุบัน</div>
+              <button 
+                onclick="if(window.startCreatingAtUserLocation) { window.startCreatingAtUserLocation(); }" 
+                class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-all border-none active:scale-95 inline-block"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg> เพิ่มข้อมูล
+              </button>
+            </div>
+          `;
+          const uMarker = L.marker([safeULat, safeULng], { icon })
+            .addTo(mapInstanceRef.current)
+            .bindPopup(popupContent, { closeButton: true });
+          
+          userLocationMarkerRef.current = uMarker;
+        } catch (err) {
+          console.error('Failed to create user location marker:', err);
+        }
+      }
     }
   }, [userLocation]);
 
-  // Smooth Focus (Fly to) coordinates helper
-  const handleMapFocus = (lat: number, lng: number, zoom = 14) => {
+  // 10b. Auto Zoom/Scale to fit filtered results
+  useEffect(() => {
+    if (!mapInstanceRef.current || filteredLocations.length === 0 || isCreating || isEditing) return;
+
+    // Only auto-zoom if the search/filter changed and we aren't currently focusing a specific pin
+    const validCoords = filteredLocations
+      .map(loc => [parseFloat(String(loc.lat)), parseFloat(String(loc.lng))] as [number, number])
+      .filter(coord => !isNaN(coord[0]) && !isNaN(coord[1]) && isFinite(coord[0]) && isFinite(coord[1]));
+
+    if (validCoords.length === 0) return;
+
+    const bounds = L.latLngBounds(validCoords);
+    
+    // Check if bounds are valid
+    if (bounds.isValid()) {
+      mapInstanceRef.current.flyToBounds(bounds, {
+        padding: [40, 40],
+        maxZoom: 16,
+        duration: 1.5
+      });
+    }
+  }, [filteredLocations.length, tambonFilter, mooFilter, categoryFilter, searchQuery]);
+
+  // 10c. Route Logic: Fetch route from OSRM and display on map
+  useEffect(() => {
     if (!mapInstanceRef.current) return;
-    if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) {
+
+    // Clear existing route polyline
+    if (routeLayerRef.current) {
+      routeLayerRef.current.remove();
+      routeLayerRef.current = null;
+    }
+
+    if (routePoints.length < 2) {
+      setRoutePolyline(null);
+      setRouteDistance(null);
+      setRouteDuration(null);
+      return;
+    }
+
+    const fetchRoute = async () => {
+      try {
+        const coords = routePoints.map(p => `${p.lng},${p.lat}`).join(';');
+        const url = `https://router.project-osrm.org/route/v1/driving/${coords}?geometries=geojson&overview=full`;
+        
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Network response was not ok');
+        
+        const data = await response.json();
+        if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+          console.warn('OSRM routing request failed or returned no routes');
+          return;
+        }
+
+        const route = data.routes[0];
+        const geometry = route.geometry.coordinates
+          .map((c: [number, number]) => [Number(c[1]), Number(c[0])] as [number, number])
+          .filter(coord => !isNaN(coord[0]) && !isNaN(coord[1]) && isFinite(coord[0]) && isFinite(coord[1]));
+        
+        if (geometry.length === 0) return;
+
+        setRoutePolyline(geometry);
+        setRouteDistance(route.distance);
+        setRouteDuration(route.duration);
+
+        // Draw on map
+        const polyline = L.polyline(geometry, {
+          color: '#3b82f6', // blue-500
+          weight: 6,
+          opacity: 0.8,
+          lineJoin: 'round',
+          dashArray: '10, 10',
+          className: 'animate-route-path'
+        }).addTo(mapInstanceRef.current!);
+
+        routeLayerRef.current = polyline;
+
+        // Auto-zoom to fit the route
+        const bounds = polyline.getBounds();
+        if (bounds.isValid()) {
+          mapInstanceRef.current!.flyToBounds(bounds, {
+            padding: [50, 50],
+            duration: 1.5
+          });
+        }
+
+      } catch (err) {
+        console.error('Failed to fetch route:', err);
+      }
+    };
+
+    fetchRoute();
+  }, [routePoints]);
+
+  // Smooth Focus (Fly to) coordinates helper
+  const handleMapFocus = (lat: any, lng: any, zoom = 14) => {
+    if (!mapInstanceRef.current) return;
+    
+    const plat = parseFloat(String(lat));
+    const plng = parseFloat(String(lng));
+    const pzoom = parseFloat(String(zoom));
+
+    if (isNaN(plat) || isNaN(plng) || !isFinite(plat) || !isFinite(plng)) {
       console.warn('handleMapFocus received invalid coordinates:', lat, lng);
       return;
     }
-    mapInstanceRef.current.flyTo([lat, lng], zoom, {
-      animate: true,
-      duration: 1.5
-    });
+
+    try {
+      const size = mapInstanceRef.current.getSize();
+      const targetZoom = (isNaN(pzoom) || !isFinite(pzoom)) ? 14 : pzoom;
+      
+      // Fallback to setView without animation if the map container is hidden or too small
+      if (size.x <= 0 || size.y <= 0) {
+        mapInstanceRef.current.setView([plat, plng], targetZoom);
+      } else {
+        mapInstanceRef.current.flyTo([plat, plng], targetZoom, {
+          animate: true,
+          duration: 1.5,
+          easeLinearity: 0.25
+        });
+      }
+    } catch (err) {
+      console.error('Map flyTo failed:', err);
+    }
   };
 
-  // Helper: Request GPS
+  // Helper: Request GPS (Real-time tracking)
   const handleGetMyGPS = () => {
     if (!navigator.geolocation) {
-      alert('เบราว์เซอร์ของคุณไม่สนับสนุนฟังก์ชันค้นหาพิกัด Geolocation');
+      showToast('เบราว์เซอร์ของคุณไม่สนับสนุน GPS', 'error');
+      return;
+    }
+
+    if (isLocating && watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+      setIsLocating(false);
+      showToast('หยุดการติดตามตำแหน่งแล้ว', 'info');
       return;
     }
 
     setIsLocating(true);
+    showToast('กำลังรับข้อมูลตำแหน่งแบบ Real-Time...', 'info');
+    
+    // Request notification permission for proximity alerts
+    if ('Notification' in window) {
+      Notification.requestPermission().then(permission => {
+        notificationPermissionRef.current = permission;
+      });
+    }
+
+    // Initial fetch
     navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        if (latitude === undefined || longitude === undefined || isNaN(latitude) || isNaN(longitude)) return;
+        const myLat = parseFloat(latitude.toFixed(6));
+        const myLng = parseFloat(longitude.toFixed(6));
+        if (isNaN(myLat) || isNaN(myLng)) return;
+        setUserLocation({ lat: myLat, lng: myLng });
+        handleMapFocus(myLat, myLng, 16);
+        showToast('เชื่อมต่อ GPS สำเร็จ', 'success');
+      },
+      (error) => {
+        console.warn('Initial GPS fetch failed:', error);
+        if (error.code === 1) {
+          showToast('การเข้าถึงตำแหน่งถูกปฏิเสธ', 'error');
+        } else {
+          showToast('ไม่สามารถระบุตำแหน่งได้', 'error');
+        }
+        setIsLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 5000 }
+    );
+
+    // Start watching
+    const watchId = navigator.geolocation.watchPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
         const myLat = parseFloat(latitude.toFixed(6));
         const myLng = parseFloat(longitude.toFixed(6));
         
-        if (isNaN(myLat) || isNaN(myLng)) {
-          alert('ไม่พบข้อมูลพิกัด GPS ปัจจุบันจากเซ็นเซอร์ หรือข้อมูลไม่สมบูรณ์');
-          setIsLocating(false);
-          return;
-        }
+        if (isNaN(myLat) || isNaN(myLng)) return;
 
         setUserLocation({ lat: myLat, lng: myLng });
-        setIsLocating(false);
-        handleMapFocus(myLat, myLng, 15);
+        
+        // Only auto-pan if the user is in map view and we just started
+        // Actually, for "real-time", let's keep following them if the map isn't being moved by user?
+        // Simple implementation: update user state, which updates the marker via useEffect.
       },
       (error) => {
+        console.error('Real-time GPS tracking error:', error);
         setIsLocating(false);
-        alert(`เกิดข้อผิดพลาดในการหาพิกัด GPS: ${error.message}. กรุณาอนุญาตสิทธิ์เข้าถึงอุปกรณ์ของคุณ`);
+        if (watchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+        }
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
+
+    watchIdRef.current = watchId;
   };
+
+  // Background Proximity Checker
+  useEffect(() => {
+    if (!userLocation || locations.length === 0) return;
+    
+    locations.forEach(loc => {
+      const distKm = calculateDistanceKm(userLocation.lat, userLocation.lng, loc.lat, loc.lng);
+      
+      // Check if within 500 meters (0.5 km)
+      if (distKm <= 0.5) {
+        if (!notifiedLocationsRef.current.has(loc.id)) {
+          // Add to set immediately to prevent duplicate notifications in rapid succession
+          notifiedLocationsRef.current.add(loc.id);
+          
+          if ('Notification' in window && notificationPermissionRef.current === 'granted') {
+            new Notification('📍 คุณอยู่ใกล้ตำแหน่งที่บันทึกไว้', {
+              body: `คุณอยู่ห่างจาก "${loc.name}" เพียง ${(distKm * 1000).toFixed(0)} เมตร`,
+              icon: '/favicon.ico'
+            });
+          }
+          showToast(`📍 คุณอยู่ใกล้ "${loc.name}" ในระยะ ${(distKm * 1000).toFixed(0)} เมตร`, 'info');
+        }
+      } else {
+        // If they move away (e.g., > 600m), we could reset it so they get notified again if they come back
+        // Using a slightly larger threshold (0.6 km) to prevent flip-flopping exactly at 500m
+        if (distKm > 0.6 && notifiedLocationsRef.current.has(loc.id)) {
+          notifiedLocationsRef.current.delete(loc.id);
+        }
+      }
+    });
+  }, [userLocation, locations]);
 
   // Reverse geocoding tool using free OpenStreetMap Nominatim for Thai Address Details
   const fetchThaiAddressDetails = async (lat: number, lng: number) => {
@@ -670,6 +1117,59 @@ export default function App() {
     }
   };
 
+  // A global function to allow Leaflet popups (HTML strings) to trigger creating a location
+  useEffect(() => {
+    (window as any).startCreatingAtUserLocation = () => {
+      if (userLocation) {
+        const uLat = parseFloat(String(userLocation.lat));
+        const uLng = parseFloat(String(userLocation.lng));
+        if (!isNaN(uLat) && !isNaN(uLng) && isFinite(uLat) && isFinite(uLng)) {
+          const lat = parseFloat(uLat.toFixed(6));
+          const lng = parseFloat(uLng.toFixed(6));
+          setSelectedMapPoint({ lat, lng });
+          setIsCreating(true);
+          setIsEditing(false);
+          setFormName('หมุดพิกัดจัดเก็บใหม่ (ตำแหน่งปัจจุบัน)');
+          setFormLat(lat);
+          setFormLng(lng);
+          if (!lockType) setFormCategory('Village');
+          setFormNotes('');
+          setFormGoogleMapLink('');
+          if (!lockSoi) setFormSoi('');
+          if (!lockMoo) setFormMoo('');
+          if (!lockTambon) setFormTambon('');
+          if (!lockAmphoe) setFormAmphoe('');
+          fetchThaiAddressDetails(lat, lng);
+          if (mapInstanceRef.current) {
+            mapInstanceRef.current.closePopup();
+          }
+        }
+      } else {
+        alert("กรุณารอรับพิกัด GPS ก่อนทำการเพิ่มข้อมูล");
+      }
+    };
+    return () => {
+      delete (window as any).startCreatingAtUserLocation;
+    };
+  }, [userLocation, lockType, lockSoi, lockMoo, lockTambon, lockAmphoe]);
+
+  // Global helper for adding to route from Leaflet popups
+  useEffect(() => {
+    (window as any).addToRouteById = (id: string) => {
+      const location = locations.find(l => l.id === id);
+      if (location) {
+        setRoutePoints(prev => {
+          if (prev.find(p => p.id === id)) return prev;
+          return [...prev, location];
+        });
+        setIsRouteMode(true);
+      }
+    };
+    return () => {
+      delete (window as any).addToRouteById;
+    };
+  }, [locations]);
+
   const handleGetCurrentLocationForForm = () => {
     if (!navigator.geolocation) {
       alert('เบราว์เซอร์ของคุณไม่สนับสนุนฟังก์ชันค้นหาพิกัด Geolocation');
@@ -678,6 +1178,10 @@ export default function App() {
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
+        if (latitude === undefined || longitude === undefined || isNaN(latitude) || isNaN(longitude)) {
+          alert('ไม่พบพิกัดที่ถูกต้องจากเซ็นเซอร์ของอุปกรณ์ หรือรูปพิกัดคลาดเคลื่อนผิดพลาด');
+          return;
+        }
         const latVal = parseFloat(latitude.toFixed(6));
         const lngVal = parseFloat(longitude.toFixed(6));
         
@@ -688,6 +1192,7 @@ export default function App() {
 
         setFormLat(latVal);
         setFormLng(lngVal);
+        setFormCoords(`${latVal}, ${lngVal}`);
         // Auto fetch
         fetchThaiAddressDetails(latVal, lngVal);
       },
@@ -711,7 +1216,8 @@ export default function App() {
       const inputLat = parseFloat(match[1]);
       const inputLng = parseFloat(match[3]);
       
-      if (inputLat >= -90 && inputLat <= 90 && inputLng >= -180 && inputLng <= 180) {
+      if (!isNaN(inputLat) && isFinite(inputLat) && !isNaN(inputLng) && isFinite(inputLng) && 
+          inputLat >= -90 && inputLat <= 90 && inputLng >= -180 && inputLng <= 180) {
         setSelectedMapPoint({ lat: inputLat, lng: inputLng });
         handleMapFocus(inputLat, inputLng, 14);
         
@@ -721,18 +1227,43 @@ export default function App() {
         setFormName('พิกัดที่ค้นหาด่วน');
         setFormLat(inputLat);
         setFormLng(inputLng);
-        setFormCategory('Village');
+        setFormCategory(lockType ? formCategory : 'Village');
         setFormNotes('ปักไว้ด้วยระบบค้นหาพิกัดนำทางด่วน');
         setFormGoogleMapLink('');
-        setFormSoi('');
-        setFormMoo('');
-        setFormTambon('');
-        setFormAmphoe('');
+        if (!lockSoi) setFormSoi('');
+        if (!lockMoo) setFormMoo('');
+        if (!lockTambon) setFormTambon('');
+        if (!lockAmphoe) setFormAmphoe('');
       } else {
         setQuickCoordinatesError('ค่าพิกัดไม่อยู่ในขอบเขตสากล (Lat -90 ถึง 90, Lng -180 ถึง 180)');
       }
     } else {
       setQuickCoordinatesError('กรุณาป้อนรูปแบบที่ถูกต้อง เช่น: 13.8095, 100.5605');
+    }
+  };
+
+  // Helper: Parse and handle single coordinate field inputs
+  const handleCoordsInputChange = (val: string) => {
+    setFormCoords(val);
+    
+    // Clean and split by common separators (comma, spaces, slashes)
+    const cleanVal = val.replace(/[()[\]{}]/g, ''); // strip parentheses
+    const parts = cleanVal.split(/[,\s/|]+/).map(p => p.trim()).filter(Boolean);
+    
+    if (parts.length >= 2) {
+      const parsedLat = parseFloat(parts[0]);
+      const parsedLng = parseFloat(parts[1]);
+      
+      if (!isNaN(parsedLat) && isFinite(parsedLat) && !isNaN(parsedLng) && isFinite(parsedLng)) {
+        setFormLat(parsedLat);
+        setFormLng(parsedLng);
+      } else {
+        setFormLat('');
+        setFormLng('');
+      }
+    } else {
+      setFormLat('');
+      setFormLng('');
     }
   };
 
@@ -747,6 +1278,7 @@ export default function App() {
     setFormNotes(loc.notes);
     setFormLat(loc.lat);
     setFormLng(loc.lng);
+    setFormCoords(`${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}`);
     setFormGoogleMapLink(loc.googleMapLink || '');
     setFormSoi(loc.soi || '');
     setFormMoo(loc.moo || '');
@@ -754,24 +1286,30 @@ export default function App() {
     setFormAmphoe(loc.amphoe || '');
   };
 
-  // Delete Action
-  const handleDeleteLocation = async (id: string) => {
-    if (window.confirm('คุณต้องการยืนยันลบพิกัดข้อมูลตำแหน่งนี้ออกจากแอปใช่หรือไม่?')) {
-      if (isFirebaseConfigured) {
-        try {
-          const docRef = doc(db, 'landmarks', id);
-          await deleteDoc(docRef);
-        } catch (err) {
-          console.error('Failed to delete on Firebase:', err);
-        }
-      } else {
-        const updated = locations.filter(l => l.id !== id);
-        setLocations(updated);
+  // Delete Action triggered via custom Modal
+  const handleDeleteLocation = (id: string) => {
+    setDeleteTargetId(id);
+  };
+
+  // จริงใจดำเนินการลบ
+  const handleConfirmDelete = async () => {
+    if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    if (isFirebaseConfigured) {
+      try {
+        const docRef = doc(db, 'landmarks', id);
+        await deleteDoc(docRef);
+      } catch (err) {
+        console.error('Failed to delete on Firebase:', err);
       }
-      if (activeLocationId === id) {
-        setActiveLocationId(null);
-      }
+    } else {
+      const updated = locations.filter(l => l.id !== id);
+      setLocations(updated);
     }
+    if (activeLocationId === id) {
+      setActiveLocationId(null);
+    }
+    setDeleteTargetId(null);
   };
 
   // 📍 ฟังก์ชันปรับความแม่นยำของตำแหน่งให้เสถียรในรัศมี ±5 เมตร
@@ -793,12 +1331,12 @@ export default function App() {
     const latVal = parseFloat(String(formLat));
     const lngVal = parseFloat(String(formLng));
 
-    if (isNaN(latVal) || latVal < -90 || latVal > 90) {
+    if (isNaN(latVal) || !isFinite(latVal) || latVal < -90 || latVal > 90) {
       alert('กรุณาป้อนละติจูดให้ถูกต้องระหว่าง -90 และ 90');
       return;
     }
 
-    if (isNaN(lngVal) || lngVal < -185 || lngVal > 185) {
+    if (isNaN(lngVal) || !isFinite(lngVal) || lngVal < -180 || lngVal > 180) {
       alert('กรุณาป้อนลองจิจูดให้ถูกต้องระหว่าง -180 และ 180');
       return;
     }
@@ -892,10 +1430,14 @@ export default function App() {
     setIsEditing(false);
     setSelectedMapPoint(null);
     setFormGoogleMapLink('');
-    setFormSoi('');
-    setFormMoo('');
-    setFormTambon('');
-    setFormAmphoe('');
+    
+    // ตรวจสอบเงื่อนไขกุญแจล็อกก่อนเคลียร์ค่า
+    if (!lockType) setFormCategory('Village');
+    if (!lockSoi) setFormSoi('');
+    if (!lockMoo) setFormMoo('');
+    if (!lockTambon) setFormTambon('');
+    if (!lockAmphoe) setFormAmphoe('');
+    if (!lockGps) setLockGps(false);
   };
 
   // Export saved bookmarks to JSON file
@@ -1044,13 +1586,50 @@ export default function App() {
 
   // Locations scheduled on "Today's queue" list (All locations without Google Maps link)
   const queueLocations = useMemo(() => {
-    return locations.filter(l => !l.googleMapLink);
-  }, [locations]);
+    const withoutLinks = locations.filter(l => !l.googleMapLink);
+    if (userLocation) {
+      return withoutLinks
+        .map(l => ({ ...l, dist: calculateDistanceKm(userLocation.lat, userLocation.lng, l.lat, l.lng) }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 5)
+        .map(l => {
+          const { dist, ...rest } = l;
+          return rest as BookmarkLocation & { dist?: number }; // typing workaround
+        });
+    }
+    return withoutLinks.slice(0, 5);
+  }, [locations, userLocation]);
 
   return (
     <div id="app-root-container" className="flex flex-col lg:flex-row h-screen w-full select-none overflow-hidden bg-slate-50 text-slate-800">
       
-      {/* 1. Sleek Dashboard View (matches the user's dashboard image) */}
+      {/* 1.5 Sleek Table View (Hidden by default, visible when currentView === 'table') */}
+      {currentView === 'table' && (
+        <div id="aesthetic-table-panel" className="w-full h-full bg-[#0A0B0F]/95 text-[#D8DADF] flex flex-col overflow-y-auto p-6 md:p-10 relative z-30 font-sans">
+          {/* Subtle glowing accent background */}
+          <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-indigo-500/10 rounded-full blur-[140px] pointer-events-none"></div>
+          
+          <div className="flex items-center justify-between mb-8 z-10">
+            <div>
+              <h1 className="text-3xl font-black tracking-tight text-white font-display">
+                DATA <span className="text-[#FF6B00]">TABLE</span>
+              </h1>
+              <p className="text-slate-400 text-sm font-medium mt-1">ตารางพิกัดข้อมูลทั้งหมด</p>
+            </div>
+            <button 
+              onClick={() => setCurrentView('dashboard')} 
+              className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold text-sm transition-colors border border-slate-700 flex items-center gap-2"
+            >
+              <LayoutDashboard size={16} />
+               กลับหน้าหลัก
+            </button>
+          </div>
+
+          <div className="flex-1 w-full z-10 max-w-7xl mx-auto">
+            <TableView locations={locations} />
+          </div>
+        </div>
+      )}
       {currentView === 'dashboard' && (
         <div id="aesthetic-dashboard-panel" className="w-full h-full bg-[#0A0B0F]/95 text-[#D8DADF] flex flex-col justify-between overflow-y-auto p-6 md:p-10 relative z-30 font-sans">
           
@@ -1071,6 +1650,10 @@ export default function App() {
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse border-2 border-slate-900"></span>
                     ระบบพร้อมใช้งานออนไลน์
                   </span>
+                  <button onClick={() => setCurrentView('table')} className="ml-2 inline-flex items-center gap-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-semibold text-[#FF6B00] transition-colors">
+                    <ClipboardList size={12} />
+                    ดูตาราง
+                  </button>
                 </p>
               </div>
               <div className="hidden sm:flex items-center gap-3 bg-slate-900/60 border border-slate-800/80 px-4 py-2.5 rounded-2xl backdrop-blur-md">
@@ -1142,15 +1725,16 @@ export default function App() {
                   setIsEditing(false);
                   setSelectedMapPoint(null);
                   setFormName('');
-                  setFormCategory('Village');
+                  if (!lockType) setFormCategory('Village');
                   setFormNotes('');
                   setFormLat('');
                   setFormLng('');
+                  setFormCoords('');
                   setFormGoogleMapLink('');
-                  setFormSoi('');
-                  setFormMoo('');
-                  setFormTambon('');
-                  setFormAmphoe('');
+                  if (!lockSoi) setFormSoi('');
+                  if (!lockMoo) setFormMoo('');
+                  if (!lockTambon) setFormTambon('');
+                  if (!lockAmphoe) setFormAmphoe('');
                 }}
                 className="aspect-square bg-[#13141B]/90 hover:bg-[#1C1D26] border border-slate-800/60 hover:border-slate-700 text-[#D8DADF] rounded-[24px] p-5 flex flex-col items-center justify-between transition-all duration-350 hover:-translate-y-2 hover:shadow-2xl hover:shadow-emerald-500/10 group cursor-pointer text-center"
               >
@@ -1265,7 +1849,7 @@ export default function App() {
         </div>
       )}
       {/* 2. Interactive Map Screen (Visible when currentView === 'map') */}
-      <div id="interactive-map-workspace" className={`flex-1 flex flex-col lg:flex-row h-screen w-full select-none overflow-hidden bg-slate-50 ${currentView === 'map' ? '' : 'hidden'}`}>
+      <div id="interactive-map-workspace" className={`flex flex-col lg:flex-row h-screen w-full select-none bg-slate-50 overflow-hidden ${currentView === 'map' ? 'flex-1 relative' : 'absolute top-0 left-0 opacity-0 pointer-events-none z-[-999]'}`}>
         
         {/* SIDEBAR PANEL : Operations, Search & CRUD */}
         <aside 
@@ -1353,27 +1937,26 @@ export default function App() {
                 {/* Form fields */}
                 <form id="coordinate-crud-form" onSubmit={(e) => e.preventDefault()} className="space-y-3.5">
                   
-                  {/* Name field */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-350 mb-1">
-                      ชื่อเรียกจุดพิกัดสถานที่ <span className="text-red-500">*</span>
-                    </label>
-                    <input 
-                      id="input-location-name"
-                      type="text" 
-                      required
-                      value={formName}
-                      onChange={(e) => setFormName(e.target.value)}
-                      placeholder="เช่น หมู่บ้านรุ่งทิพย์, ชุมชนพัฒนา" 
-                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-medium"
-                    />
-                  </div>
-
                   {/* Category Selection Component */}
                   <div>
-                    <label className="block text-xs font-semibold text-slate-350 mb-1.5">
-                      เลือกประเภทสถานที่
-                    </label>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <label className="block text-xs font-semibold text-slate-350">
+                        เลือกประเภทสถานที่
+                      </label>
+                      <button 
+                        type="button" 
+                        onClick={() => setLockType(!lockType)} 
+                        className={`flex items-center gap-1 px-2 py-0.5 rounded-full border transition-all text-[10px] font-bold ${
+                          lockType 
+                            ? 'bg-amber-500/10 border-amber-500/50 text-amber-400' 
+                            : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                        } cursor-pointer`}
+                        title={lockType ? "คลิกเพื่อปลดล็อคประเภท" : "คลิกเพื่อล็อคประเภทนี้ไว้"}
+                      >
+                        {lockType ? <Lock size={10} /> : <Unlock size={10} />}
+                        <span>{lockType ? 'ล็อคแล้ว' : 'ไม่ล็อค'}</span>
+                      </button>
+                    </div>
                     <div className="grid grid-cols-4 gap-1.5 font-sans">
                       {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
                         const isSelected = formCategory === cat;
@@ -1400,50 +1983,195 @@ export default function App() {
                   </div>
 
                   {/* GET CURRENT LOCATION BUTTON */}
-                  <div>
+                  <div className="flex gap-2">
                     <button
                       id="btn-form-get-current"
                       type="button"
                       onClick={handleGetCurrentLocationForForm}
-                      className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white font-bold text-xs py-2 px-3 rounded-lg hover:bg-slate-700 transition shadow cursor-pointer active:scale-98"
+                      className="flex-1 flex items-center justify-center gap-2 bg-slate-800 text-white font-bold text-xs py-2 px-3 rounded-lg hover:bg-slate-700 transition shadow cursor-pointer active:scale-98"
                     >
                       <MapPin size={13} className="text-[#FF6B00]" />
-                      <span>ดึงตำแหน่ง GPS ปัจจุบัน</span>
+                      <span>ดึงตำแหน่ง GPS</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLockGps(!lockGps)}
+                      className={`px-3 py-2 rounded-lg border transition-all flex items-center gap-1.5 ${
+                        lockGps 
+                          ? 'bg-amber-500 border-amber-600 text-white shadow-lg' 
+                          : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                      } cursor-pointer`}
+                      title={lockGps ? "ปลดล็อคการตามพิกัด" : "ล็อคพิกัดตามตำแหน่งจริง"}
+                    >
+                      {lockGps ? <Lock size={12} /> : <Unlock size={12} />}
+                      <span className="text-[10px] font-bold">{lockGps ? 'ล็อค' : 'ล็อก'}</span>
                     </button>
                   </div>
 
-                  {/* Coordinates Row */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-350 mb-1">
-                        ละติจูด (Latitude) <span className="text-red-500">*</span>
-                      </label>
-                      <input 
-                        id="input-latitude"
-                        type="number" 
-                        step="any"
-                        required
-                        value={formLat || ''}
-                        onChange={(e) => setFormLat(parseFloat(e.target.value))}
-                        placeholder="13.7563"
-                        className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-805 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-mono"
-                      />
+                  {/* Name field */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-350 mb-1">
+                      ชื่อเรียกจุดพิกัดสถานที่ <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      id="input-location-name"
+                      type="text" 
+                      required
+                      value={formName}
+                      onChange={(e) => setFormName(e.target.value)}
+                      placeholder="เช่น หมู่บ้านรุ่งทิพย์, ชุมชนพัฒนา" 
+                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-medium"
+                    />
+                  </div>
+
+                  {/* Thailand Specific Address Information Grid (Soi, Moo, Tambon, Amphoe) */}
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2 mt-2 text-[#E2E8F0]">
+                    <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider block border-b border-slate-800 pb-1 flex justify-between items-center">
+                      🏢 ข้อมูลที่อยู่ประเทศไทย
+                      <span className="text-[9px] text-amber-400 font-normal">คลิกรูปกุญแจเพื่อล็อคค่าที่อยู่ไว้</span>
+                    </span>
+                    
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5 flex justify-between items-center">
+                          <span>ชื่อซอย (Soi)</span>
+                        </label>
+                        <div className="relative flex items-center">
+                          <input 
+                            id="input-soi"
+                            type="text"
+                            value={formSoi}
+                            onChange={(e) => setFormSoi(e.target.value)}
+                            placeholder="เช่น ซอยมิตรไมตรี" 
+                            className="w-full text-xxs pl-2.5 pr-7 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                          <button 
+                            type="button" 
+                            onClick={() => setLockSoi(!lockSoi)} 
+                            className={`absolute right-1.5 p-1 transition-all ${
+                              lockSoi 
+                                ? 'text-amber-400 scale-110' 
+                                : 'text-slate-600 hover:text-slate-400'
+                            } cursor-pointer`}
+                          >
+                            {lockSoi ? <Lock size={11} /> : <Unlock size={11} />}
+                          </button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5 flex justify-between items-center">
+                          <span>หมู่ที่ (Moo)</span>
+                        </label>
+                        <div className="relative flex items-center">
+                          <input 
+                            id="input-moo"
+                            type="text"
+                            value={formMoo}
+                            onChange={(e) => setFormMoo(e.target.value)}
+                            placeholder="เช่น หมู่ 3" 
+                            className="w-full text-xxs pl-2.5 pr-7 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                          <button 
+                            type="button" 
+                            onClick={() => setLockMoo(!lockMoo)} 
+                            className={`absolute right-1.5 p-1 transition-all ${
+                              lockMoo 
+                                ? 'text-amber-400 scale-110' 
+                                : 'text-slate-600 hover:text-slate-400'
+                            } cursor-pointer`}
+                          >
+                            {lockMoo ? <Lock size={11} /> : <Unlock size={11} />}
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-350 mb-1">
-                        ลองจิจูด (Longitude) <span className="text-red-500">*</span>
-                      </label>
-                      <input 
-                        id="input-longitude"
-                        type="number" 
-                        step="any"
-                        required
-                        value={formLng || ''}
-                        onChange={(e) => setFormLng(parseFloat(e.target.value))}
-                        placeholder="100.5018"
-                        className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-805 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-mono"
-                      />
+
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5 flex justify-between items-center">
+                          <span>ตำบล (Tambon) - จังหวัดนนทบุรี</span>
+                        </label>
+                        <div className="relative flex items-center">
+                          <select 
+                            id="input-tambon"
+                            value={formTambon}
+                            onChange={(e) => setFormTambon(e.target.value)}
+                            className="w-full text-xxs pl-2.5 pr-7 py-2 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500 appearance-none cursor-pointer"
+                          >
+                            <option value="">-- เลือกตำบล --</option>
+                            {NONTHABURI_TAMBONS.map((t) => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                          <button 
+                            type="button" 
+                            onClick={() => setLockTambon(!lockTambon)} 
+                            className={`absolute right-1.5 p-1 transition-all ${
+                              lockTambon 
+                                ? 'text-amber-400 scale-110' 
+                                : 'text-slate-600 hover:text-slate-400'
+                            } cursor-pointer`}
+                          >
+                            {lockTambon ? <Lock size={11} /> : <Unlock size={11} />}
+                          </button>
+                        </div>
+                      </div>
                     </div>
+                  </div>
+
+                  {/* Description notes */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-350 mb-1">
+                      ระบุบันทึกรายละเอียดพิกัด
+                    </label>
+                    <textarea 
+                      id="input-notes"
+                      rows={2}
+                      value={formNotes}
+                      onChange={(e) => setFormNotes(e.target.value)}
+                      placeholder="เพิ่มโน้ตรายละเอียดสถานที่สำคัญ..." 
+                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] leading-relaxed resize-none"
+                    />
+                  </div>
+
+                  {/* Add Google Maps Link input */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-350 mb-1">
+                      กรอก Link GoogleMap
+                    </label>
+                    <input 
+                      id="input-google-map-link"
+                      type="url" 
+                      value={formGoogleMapLink}
+                      onChange={(e) => setFormGoogleMapLink(e.target.value)}
+                      placeholder="เช่น https://goo.gl/maps/..." 
+                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-medium"
+                    />
+                  </div>
+
+                  {/* Merged Coordinates Input */}
+                  <div className="space-y-1">
+                    <label className="block text-xs font-semibold text-slate-350 mb-1">
+                      พิกัด (ละติจูด, ลองจิจูด) <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      id="input-coordinates"
+                      type="text" 
+                      required
+                      value={formCoords}
+                      onChange={(e) => handleCoordsInputChange(e.target.value)}
+                      placeholder="เช่น 13.7563, 100.5018"
+                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-805 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-mono"
+                    />
+                    {formLat !== '' && formLng !== '' && !isNaN(Number(formLat)) && !isNaN(Number(formLng)) ? (
+                      <span className="text-[10px] text-emerald-400 font-mono block mt-1">
+                        ✓ แยกสำเร็จ: {Number(formLat).toFixed(6)}, {Number(formLng).toFixed(6)}
+                      </span>
+                    ) : formCoords.trim() !== '' ? (
+                      <span className="text-[10px] text-red-400 font-medium block mt-1">
+                        ✗ รูปแบบพิกัดไม่ถูกต้อง (กรุณาป้อน ละติจูด, ลองจิจูด)
+                      </span>
+                    ) : null}
                   </div>
 
                   <div className="text-[11px] text-emerald-400/80 bg-emerald-950/40 p-2 rounded border border-emerald-800/30 mt-1">
@@ -1465,95 +2193,6 @@ export default function App() {
                       </a>
                     </div>
                   )}
-
-                  {/* Add Google Maps Link input */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-350 mb-1">
-                      กรอก Link GoogleMap
-                    </label>
-                    <input 
-                      id="input-google-map-link"
-                      type="url" 
-                      value={formGoogleMapLink}
-                      onChange={(e) => setFormGoogleMapLink(e.target.value)}
-                      placeholder="เช่น https://goo.gl/maps/..." 
-                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-100 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] font-medium"
-                    />
-                  </div>
-
-                  {/* Thailand Specific Address Information Grid (Soi, Moo, Tambon, Amphoe) */}
-                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 space-y-2 mt-2 text-[#E2E8F0]">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block border-b border-slate-800 pb-1">ข้อมูลที่อยู่สอดคล้องประเทศไทย</span>
-                    
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5">ชื่อซอย (Soi)</label>
-                        <input 
-                          id="input-soi"
-                          type="text"
-                          value={formSoi}
-                          onChange={(e) => setFormSoi(e.target.value)}
-                          placeholder="เช่น ซอยมิตรไมตรี" 
-                          className="w-full text-xxs px-2.5 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-[#FF6B00]"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5">หมู่ที่ (Moo)</label>
-                        <input 
-                          id="input-moo"
-                          type="text"
-                          value={formMoo}
-                          onChange={(e) => setFormMoo(e.target.value)}
-                          placeholder="เช่น หมู่ 3" 
-                          className="w-full text-xxs px-2.5 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-[#FF6B00]"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5">ตำบล/แขวง (Tambon)</label>
-                        <select 
-                          id="input-tambon"
-                          value={formTambon}
-                          onChange={(e) => setFormTambon(e.target.value)}
-                          className="w-full text-xxs px-2.5 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-[#FF6B00] appearance-none cursor-pointer"
-                        >
-                          <option value="">-- เลือกตำบล/แขวง --</option>
-                          <option value="บางเลน">บางเลน</option>
-                          <option value="บางใหญ่">บางใหญ่</option>
-                          <option value="บางม่วง">บางม่วง</option>
-                          <option value="เสาธงหิน">เสาธงหิน</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-0.5">เขต/อำเภอ (Amphoe)</label>
-                        <input 
-                          id="input-amphoe"
-                          type="text"
-                          value={formAmphoe}
-                          onChange={(e) => setFormAmphoe(e.target.value)}
-                          placeholder="เช่น เขตพญาไท" 
-                          className="w-full text-xxs px-2.5 py-1.5 bg-[#14161E] border border-slate-800 rounded-md text-slate-100 focus:outline-none focus:ring-1 focus:ring-[#FF6B00]"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Description notes */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-350 mb-1">
-                      ระบุบันทึกรายละเอียดพิกัด
-                    </label>
-                    <textarea 
-                      id="input-notes"
-                      rows={2}
-                      value={formNotes}
-                      onChange={(e) => setFormNotes(e.target.value)}
-                      placeholder="เพิ่มโน้ตรายละเอียดสถานที่สำคัญ..." 
-                      className="w-full text-xs px-3 py-2 bg-slate-900 border border-slate-800 text-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] leading-relaxed resize-none"
-                    />
-                  </div>
 
                   {/* Auto-saving status indicator and done button */}
                   <div className="pt-2 font-sans">
@@ -1599,13 +2238,37 @@ export default function App() {
                     <h3 className="text-sm font-bold text-slate-800 pt-1 leading-snug">
                       {activeLocation.name}
                     </h3>
+                    <div className="flex flex-col gap-1 mt-1">
+                      <div className="flex items-center gap-2 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 w-fit">
+                        <span className="text-[10px] font-bold text-slate-500 font-mono">
+                          {activeLocation.lat.toFixed(6)}, {activeLocation.lng.toFixed(6)}
+                        </span>
+                        <button
+                          id="btn-copy-coords-desktop"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`);
+                            showToast('คัดลอกพิกัดเรียบร้อยแล้ว!', 'success');
+                          }}
+                          className="p-1 text-slate-400 hover:text-blue-600 hover:bg-slate-200/50 rounded transition-all cursor-pointer"
+                          title="คัดลอกพิกัด"
+                        >
+                          <Copy size={11} />
+                        </button>
+                      </div>
+                      {userLocation && (
+                        <div className="text-[10px] font-bold text-slate-550 mt-0.5 flex items-center gap-1">
+                          <Navigation size={10} className="text-emerald-500" />
+                          ห่างจากคุณ {(calculateDistanceKm(userLocation.lat, userLocation.lng, activeLocation.lat, activeLocation.lng) * 1000).toFixed(0)} เมตร
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0 bg-white/50 backdrop-blur p-0.5 rounded-lg border border-slate-200/30">
                     <button 
                       id="btn-edit-active"
                       onClick={() => handleStartEdit(activeLocation)} 
-                      className="p-1.5 bg-slate-50 text-slate-600 hover:text-[#FF6B00] hover:bg-[#FF6B00]/5 rounded-lg border border-slate-200/60 shadow-sm transition cursor-pointer"
+                      className="p-1.5 bg-white text-slate-600 hover:text-[#FF6B00] hover:bg-[#FF6B00]/5 rounded-lg border border-slate-200/60 shadow-sm transition cursor-pointer"
                       title="แก้ไขตำแหน่งพิกัดนี้"
                     >
                       <Edit3 size={13} />
@@ -1613,7 +2276,7 @@ export default function App() {
                     <button 
                       id="btn-delete-active"
                       onClick={() => handleDeleteLocation(activeLocation.id)} 
-                      className="p-1.5 bg-slate-50 text-slate-655 hover:text-rose-600 hover:bg-rose-50 rounded-lg border border-slate-200/60 shadow-sm transition cursor-pointer"
+                      className="p-1.5 bg-white text-slate-350 hover:text-rose-600 hover:bg-rose-50 rounded-lg border border-slate-200/60 shadow-sm transition cursor-pointer"
                       title="ลบจุดนี้ออก"
                     >
                       <Trash2 size={13} />
@@ -1621,7 +2284,7 @@ export default function App() {
                     <button 
                       id="btn-close-active"
                       onClick={() => setActiveLocationId(null)} 
-                      className="p-1.5 bg-slate-400 text-white hover:bg-slate-500 rounded-lg shadow-sm transition cursor-pointer"
+                      className="p-1.5 bg-slate-900 text-white hover:bg-slate-800 rounded-lg shadow-sm transition cursor-pointer"
                       title="ปิดหน้าต่างแสดงข้อมูล"
                     >
                       <X size={13} />
@@ -1629,81 +2292,35 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Detailed Thai Address components displayed elegantly below name */}
-                <div className="mt-3.5 bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1.5 text-xs text-slate-750 font-sans">
-                  <p className="font-bold text-[9px] text-slate-400 uppercase tracking-wider">ข้อมูลที่อยู่ประเทศไทย:</p>
-                  <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-slate-700">
-                    <div><span className="text-slate-400">ซอย:</span> {activeLocation.soi || '-'}</div>
-                    <div><span className="text-slate-400">หมู่ที่:</span> {activeLocation.moo || '-'}</div>
-                    <div className="col-span-2"><span className="text-slate-400">ตำบล/แขวง:</span> {activeLocation.tambon || '-'}</div>
-                    <div className="col-span-2"><span className="text-slate-400">เขต/อำเภอ:</span> {activeLocation.amphoe || '-'}</div>
-                  </div>
-                </div>
-
-                {/* latlng coordinates Copy-friendly info */}
-                <div 
-                  onClick={() => {
-                    navigator.clipboard.writeText(`${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`);
-                    setCopiedCoords(true);
-                    setTimeout(() => setCopiedCoords(false), 2000);
-                  }}
-                  className="mt-3 grid grid-cols-2 gap-2 bg-slate-50 hover:bg-slate-100/80 px-3.5 py-2.5 rounded-xl border border-slate-200/60 font-mono text-[10px] text-slate-500 cursor-pointer transition relative group"
-                  title="คลิกเพื่อคัดลอกพิกัดปักหมุดนี้นำไปใช้งาน"
-                >
-                  <div className="flex flex-col">
-                    <span className="text-[8px] text-slate-400 font-sans uppercase font-bold">Latitude</span>
-                    <span className="font-bold text-slate-700">{activeLocation.lat.toFixed(6)}</span>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-[8px] text-slate-400 font-sans uppercase font-bold">Longitude</span>
-                    <span className="font-bold text-slate-700">{activeLocation.lng.toFixed(6)}</span>
-                  </div>
-                  <span className="absolute right-2 top-2 text-[8px] bg-[#FF6B00] text-white font-sans font-extrabold px-1.5 py-0.5 rounded transition">
-                    {copiedCoords ? 'คัดลอกสำเร็จ ✓' : 'คัดลอกคู่พิกัด'}
-                  </span>
-                </div>
-
-                {/* Google Map Link detail status */}
-                <div className="mt-3 text-xs leading-relaxed text-slate-600 bg-slate-50/50 px-3 py-2 rounded-xl border border-slate-100">
-                  <p className="font-bold text-[9px] text-slate-400 uppercase tracking-wider mb-0.5">ลิงก์ Google Maps:</p>
-                  {activeLocation.googleMapLink ? (
-                    <a 
-                      href={activeLocation.googleMapLink} 
-                      target="_blank" 
-                      rel="noopener noreferrer" 
-                      className="text-[#FF6B00] hover:underline font-bold text-xxs block truncate max-w-full"
-                    >
-                      {activeLocation.googleMapLink}
-                    </a>
-                  ) : (
-                    <span className="text-slate-400 block italic text-xxs">ยังไม่มีข้อมูลลิงก์ที่ตั้งบันทึกไว้</span>
-                  )}
-                </div>
-
-                {/* QR Code Sharing Block (Desktop Sidebar) */}
+                                {/* QR Code Sharing Block (Desktop Sidebar) */}
                 <div className="mt-3 bg-slate-100/40 border border-slate-200/50 rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <div>
-                      <span className="font-bold text-[9px] text-slate-450 uppercase tracking-wider block">ฟีเจอร์เพิ่มแชร์พิกัด</span>
-                      <span className="text-[10px] text-slate-500 font-bold block mt-0.5">
-                        {activeLocation.googleMapLink ? 'สแกนคิวอาร์ลิ้งค์แผนที่' : 'สแกนคิวอาร์ระบุฝั่งจัดพิกัด'}
+                      <span className="font-bold text-[9px] text-slate-400 uppercase tracking-wider block font-sans">ฟีเจอร์แชร์พิกัด</span>
+                      <span className="text-[10px] text-slate-550 block mt-0.5">
+                        {activeLocation.googleMapLink ? 'สแกนคิวอาร์ลิ้งค์แผนที่' : 'สแกนคิวอาร์คู่พิกัดพอร์ตสำเร็จ'}
                       </span>
                     </div>
                     <button
-                      id="btn-toggle-qr-code"
-                      type="button"
-                      onClick={() => setShowActiveQr(!showActiveQr)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer border ${
-                        showActiveQr 
-                          ? 'bg-[#FF6B00] text-white border-[#FF6B00] shadow-sm' 
-                          : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
-                      }`}
+                      onClick={async () => {
+                        if (!showActiveQr) {
+                          const text = activeLocation.googleMapLink || `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`;
+                          try {
+                            const url = await QRCode.toDataURL(text, { width: 180, margin: 1, color: { dark: '#0F172A', light: '#FFFFFF' } });
+                            setActiveQrCodeUrl(url);
+                          } catch (err) {
+                            console.error('QR Generate Error', err);
+                          }
+                        }
+                        setShowActiveQr(!showActiveQr);
+                      }}
+                      className="px-2 py-1 bg-white border border-slate-200 text-[#FF6B00] font-bold text-[10px] rounded hover:bg-slate-50 transition cursor-pointer flex gap-1 items-center shadow-sm"
                     >
-                      <QrCode size={13} />
-                      <span>{showActiveQr ? 'ปิดคิวอาร์' : 'แสดงคิวอาร์'}</span>
+                      <QrCode size={10} />
+                      {showActiveQr ? 'ปิด QR' : 'เปิด QR'}
                     </button>
                   </div>
-
+                  
                   <AnimatePresence>
                     {showActiveQr && (
                       <motion.div
@@ -1751,46 +2368,42 @@ export default function App() {
 
                 {/* Fly maps directly button & Map navigation */}
                 <div className="mt-3.5 flex flex-col gap-2">
-                  <button 
-                    id="btn-active-flyto"
-                    onClick={() => handleMapFocus(activeLocation.lat, activeLocation.lng, 15)}
-                    className="flex-1 flex items-center justify-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-2.5 px-3 rounded-xl shadow-md transition cursor-pointer active:scale-98"
-                  >
-                    <Navigation size={13} className="text-[#FF6B00]" />
-                    <span>บินไปยังพิกัดบนแผนที่</span>
-                  </button>
-                  <a 
-                    id="btn-active-external-navigate"
-                    href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 px-3 rounded-xl shadow-md transition cursor-pointer text-center"
-                  >
-                    <Navigation size={13} />
-                    <span>นำทางด้วย Google Map</span>
-                  </a>
-                </div>
-
-              </div>
-            ) : (
-              
-              /* TUTORIAL / WELCOME TIPS */
-              <div id="welcome-tutorial-card" className="bg-gradient-to-br from-indigo-50/50 to-blue-50/50 border border-indigo-100/60 rounded-2xl p-4 animate-fadeIn">
-                <div className="flex gap-2">
-                  <Info size={16} className="text-blue-500 shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <h4 className="text-xs font-bold text-slate-855">
-                      💡 เคล็ดลับการแต่งแต้มใช้งาน:
-                    </h4>
-                    <ul className="text-[11px] text-slate-650 space-y-1 list-disc pl-3.5 leading-relaxed">
-                      <li><strong>คลิกตรงจุดใดก็ได้บนแผนที่</strong> เพื่อลอบดักจับพิกัดแล้วแต่งชื่อทำหมุดใหม่ทันที!</li>
-                      <li>เปลี่ยนภาพแผนที่เป็นดาวเทียม ผิวมินิมอล หรือลานหินมืดได้ที่เมนูด้านบน</li>
-                      <li>กดสลับสถานะ <strong>"เคยไปแล้ว"</strong> เพื่อสะสมความสำเร็จส่วนบุคคล</li>
-                    </ul>
+                  <div className="flex gap-2">
+                    <button 
+                      id="btn-active-flyto"
+                      onClick={() => handleMapFocus(activeLocation.lat, activeLocation.lng, 15)}
+                      className="flex-1 flex items-center justify-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                    >
+                      <Navigation size={12} className="text-[#FF6B00]" />
+                      <span>บินไปยังพิกัด</span>
+                    </button>
+                    <a 
+                      id="btn-active-external-navigate"
+                      href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer text-center"
+                    >
+                      <Navigation size={12} />
+                      <span>นำทาง (Google Map)</span>
+                    </a>
                   </div>
+                  <button 
+                    onClick={() => {
+                      setRoutePoints(prev => {
+                        if (prev.find(p => p.id === activeLocation.id)) return prev;
+                        return [...prev, activeLocation];
+                      });
+                      setIsRouteMode(true);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                  >
+                    <Plus size={14} />
+                    <span>เพิ่มเข้าสู่การวางแผนเส้นทาง</span>
+                  </button>
                 </div>
               </div>
-            )}
+            ) : null}
 
             {/* SEARCH AND CATEGORY FILTER COMPONENT */}
             <div id="search-filter-controls-container" className="space-y-3 pt-2">
@@ -1818,6 +2431,58 @@ export default function App() {
                 )}
               </div>
 
+              {/* Geographic Filters */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-tight ml-1">พิมพ์/เลือกตำบล</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      list="tambon-options"
+                      value={tambonFilter === 'All' ? '' : tambonFilter}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        setTambonFilter(val || 'All');
+                        setMooFilter('All');
+                      }}
+                      placeholder="ค้นหาตำบล..."
+                      className="w-full text-[11px] font-bold py-1.5 px-2 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-blue-500 text-slate-700 outline-none shadow-sm"
+                    />
+                    <datalist id="tambon-options">
+                      {uniqueTambons.map(t => (
+                        <option key={t} value={t!} />
+                      ))}
+                    </datalist>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-tight ml-1">พิมพ์/เลือกหมู่</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      list="moo-options"
+                      value={mooFilter === 'All' ? '' : mooFilter}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        setMooFilter(val || 'All');
+                      }}
+                      placeholder="ค้นหาหมู่..."
+                      className="w-full text-[11px] font-bold py-1.5 px-2 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-blue-500 text-slate-700 outline-none shadow-sm"
+                    />
+                    <datalist id="moo-options">
+                      {uniqueMoos
+                        .filter(m => {
+                          if (tambonFilter === 'All') return true;
+                          return locations.some(l => l.tambon === tambonFilter && l.moo === m);
+                        })
+                        .map(m => (
+                          <option key={m} value={m!} />
+                        ))}
+                    </datalist>
+                  </div>
+                </div>
+              </div>
+
               {/* Categorization tab list filters */}
               <div id="category-filter-tabs" className="flex flex-wrap gap-1">
                 {['All', 'Village', 'Community', 'Office', 'Condo'].map(cat => {
@@ -1838,7 +2503,13 @@ export default function App() {
                           : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                       }`}
                     >
-                      <span>{cat === 'All' ? '📌 ทั้งหมด' : `${getCategoryEmoji(cat)} ${getCategoryNameTh(cat).split(' ')[0]}`}</span>
+                      <span>
+                        {cat === 'All' ? (
+                          <span className="flex items-center gap-1.5"><MapPin size={14} /> <span>ทั้งหมด</span></span>
+                        ) : (
+                          <span className="flex items-center gap-1.5">{getCategoryEmoji(cat)} <span>{getCategoryNameTh(cat).split(' ')[0]}</span></span>
+                        )}
+                      </span>
                       <span className="text-[9px] bg-slate-700/10 text-[#334155]/80 px-1 py-0.1 ml-0.5 rounded-full font-mono">
                         {count}
                       </span>
@@ -1852,8 +2523,49 @@ export default function App() {
             {/* LOCATION LIST FEED */}
             <div id="location-cards-feed" className="space-y-2 pt-2">
               <div className="flex items-center justify-between text-xs text-slate-400 font-semibold px-1">
-                <span>รายการตำแหน่ง ({filteredLocations.length} หมุด)</span>
-                {categoryFilter !== 'All' && <span className="text-[10px] text-blue-600 font-bold">ตัวกรองทำงานอยู่</span>}
+                <div className="flex flex-col">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-500">ผลการกรอง ({filteredLocations.length})</span>
+                    {(categoryFilter !== 'All' || tambonFilter !== 'All' || mooFilter !== 'All' || searchQuery !== '') && (
+                      <button 
+                        onClick={() => {
+                          setCategoryFilter('All');
+                          setTambonFilter('All');
+                          setMooFilter('All');
+                          setSearchQuery('');
+                        }}
+                        className="text-[9px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold hover:bg-blue-200 cursor-pointer transition active:scale-95"
+                      >
+                         ✕ ล้างการกรอง
+                      </button>
+                    )}
+                  </div>
+                  {(categoryFilter !== 'All' || tambonFilter !== 'All' || mooFilter !== 'All') && (
+                    <span className="text-[9px] text-blue-500 font-medium">กำลังแสดงเฉพาะ {tambonFilter !== 'All' ? `ต.${tambonFilter}` : ''} {mooFilter !== 'All' ? `ม.${mooFilter}` : ''} {categoryFilter !== 'All' ? `(${getCategoryNameTh(categoryFilter)})` : ''}</span>
+                  )}
+                </div>
+                
+                <div className="relative">
+                  <select
+                    value={sortMode}
+                    onChange={(e) => {
+                      if (e.target.value === 'distance' && !userLocation) {
+                        alert('กรุณาเปิดการติดตามตำแหน่งปัจจุบันบนแผนที่ (ปุ่มพิกัด GPS ฉัน) ก่อนทำการเรียงตามความใกล้ระยะทาง');
+                        setSortMode('date');
+                        return;
+                      }
+                      setSortMode(e.target.value as 'date' | 'name' | 'distance');
+                    }}
+                    className="text-[10px] bg-white border border-slate-200 text-slate-700 py-1.5 pl-2.5 pr-6 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none font-bold cursor-pointer shadow-sm"
+                  >
+                    <option value="date">เรียงตามวันที่สร้าง</option>
+                    <option value="name">เรียงตามชื่อ</option>
+                    <option value="distance">ตรงนี้ใกล้สุด (GPS)</option>
+                  </select>
+                  <span className="absolute right-2 top-2 pointer-events-none text-slate-400">
+                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7"></path></svg>
+                  </span>
+                </div>
               </div>
 
               {filteredLocations.length === 0 ? (
@@ -1889,12 +2601,12 @@ export default function App() {
                               {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
                             </span>
                             {loc.googleMapLink ? (
-                              <span className="inline-flex items-center text-[8px] bg-blue-50 text-blue-700 px-1 rounded font-black">
-                                🔗 ลิงก์แมป
+                              <span className="inline-flex items-center gap-0.5 text-[8px] bg-blue-50 text-blue-700 px-1 py-0.5 rounded font-black">
+                                <Map className="w-2.5 h-2.5" /> ลิงก์แมป
                               </span>
                             ) : (
-                              <span className="inline-flex items-center text-[8px] bg-slate-100 text-slate-500 px-1 rounded font-bold">
-                                💤 รอลิงก์
+                              <span className="inline-flex items-center gap-0.5 text-[8px] bg-slate-100 text-slate-500 px-1 py-0.5 rounded font-bold">
+                                <Clock className="w-2.5 h-2.5" /> รอลิงก์
                               </span>
                             )}
                           </div>
@@ -1904,9 +2616,9 @@ export default function App() {
                           </h4>
 
                           {/* Thai sub-address badges inside feed */}
-                          {(loc.tambon || loc.amphoe) && (
+                          {loc.tambon && (
                             <p className="text-[9px] text-slate-500 font-bold mt-1 block">
-                              📍 {loc.tambon || '-'}{loc.amphoe ? ` , ${loc.amphoe}` : ''}
+                              📍 ตำบล{loc.tambon} (จ.นนทบุรี)
                             </p>
                           )}
                           
@@ -1919,6 +2631,7 @@ export default function App() {
                         <div className="ml-2 flex items-center justify-center shrink-0">
                           <button
                             id={`btn-fly-${loc.id}`}
+                            type="button"
                             onClick={(e) => {
                               e.stopPropagation();
                               setActiveLocationId(loc.id);
@@ -1945,6 +2658,17 @@ export default function App() {
                           title="แก้ไขตำแหน่ง"
                         >
                           <Edit3 size={11} />
+                        </button>
+                        <button
+                          id={`btn-quick-copy-${loc.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopyLocation(loc);
+                          }}
+                          className="p-1 hover:bg-slate-100 text-slate-655 hover:text-emerald-650 rounded cursor-pointer"
+                          title="คัดลอกรายละเอียด"
+                        >
+                          <Copy size={11} />
                         </button>
                         <button
                           id={`btn-quick-delete-${loc.id}`}
@@ -1979,13 +2703,14 @@ export default function App() {
                 setFormName('');
                 setFormLat('');
                 setFormLng('');
-                setFormCategory('Village');
+                setFormCoords('');
+                if (!lockType) setFormCategory('Village');
                 setFormNotes('');
                 setFormGoogleMapLink('');
-                setFormSoi('');
-                setFormMoo('');
-                setFormTambon('');
-                setFormAmphoe('');
+                if (!lockSoi) setFormSoi('');
+                if (!lockMoo) setFormMoo('');
+                if (!lockTambon) setFormTambon('');
+                if (!lockAmphoe) setFormAmphoe('');
                 handleMapFocus(13.7563, 100.5018, 10);
               }}
               className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-lg hover:shadow-blue-500/20 transition-all font-sans cursor-pointer animate-pulse"
@@ -2046,60 +2771,48 @@ export default function App() {
             {/* Action buttons wrapper for auto-detect mobile layout */}
             <div className={`flex gap-1.5 pointer-events-none ${isMobile ? 'justify-end w-full' : ''}`}>
               
-              {/* Quick layer styles selection dropdown */}
-              <div id="map-style-menu-toggle" className="relative pointer-events-auto shrink-0 flex items-center justify-end">
+              {/* GPS Tracker (Real-time) */}
+              <div id="gps-tracker-toggle" className="relative pointer-events-auto shrink-0 flex items-center justify-end">
                 <button 
-                  id="btn-map-styles"
-                  onClick={() => setShowTileMenu(!showTileMenu)} 
-                  className="flex items-center gap-1.5 px-3 py-2 bg-white/95 backdrop-blur-md rounded-xl shadow-lg border border-slate-200 text-slate-700 hover:text-slate-900 font-bold text-xs cursor-pointer"
-                  title="เปลี่ยนรูปภาพทัศนียภาพพื้นหลัง"
+                  id="btn-acquire-location"
+                  type="button"
+                  onClick={handleGetMyGPS}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl shadow-lg border font-bold text-xs cursor-pointer transition-all ${
+                    isLocating 
+                      ? 'bg-blue-600 text-white animate-pulse border-blue-400 shadow-blue-500/30' 
+                      : 'bg-white/95 backdrop-blur-md text-slate-700 border-slate-200 hover:text-blue-600'
+                  }`}
+                  title="ติดตามตำแหน่งปัจจุบันแบบ Real Time"
                 >
-                  <Layers size={13} className="text-indigo-500" />
-                  <span>ภาพเเผนที่</span>
+                  <Compass size={14} className={isLocating ? 'animate-spin' : 'text-blue-500'} />
+                  <span>{isLocating ? 'ปิดติดตามพิกัด' : 'พิกัด GPS ฉัน'}</span>
                 </button>
-
-                {showTileMenu && (
-                  <div id="tile-menu-dropdown" className="absolute right-0 top-full mt-2 w-52 bg-white border border-slate-200 rounded-xl shadow-2xl p-1.5 z-50 animate-slideDown">
-                    <p className="text-[10px] font-bold text-slate-400 p-1.5 select-none uppercase tracking-wider">
-                      เลือกแผนที่รองพื้น (Layers)
-                    </p>
-                    {Object.entries(TILE_LAYERS).map(([key, style]) => (
-                      <button
-                        id={`tile-style-opt-${key}`}
-                        key={key}
-                        onClick={() => {
-                          setTileStyle(key as keyof typeof TILE_LAYERS);
-                          setShowTileMenu(false);
-                        }}
-                        className={`w-full flex items-center justify-between text-left px-2 py-1.5 text-xs rounded-lg transition cursor-pointer ${
-                          tileStyle === key 
-                            ? 'bg-blue-50 text-blue-700 font-bold' 
-                            : 'text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        <span>{style.name}</span>
-                        {tileStyle === key && <Check size={12} className="text-blue-600" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
               </div>
 
-              {/* Current GPS coordinates tracking button */}
-              <button
-                id="btn-acquire-location"
-                onClick={handleGetMyGPS}
-                disabled={isLocating}
-                className={`pointer-events-auto flex items-center gap-1.5 px-3 py-2 rounded-xl shadow-lg border text-xs font-bold transition cursor-pointer ${
-                  isLocating 
-                    ? 'bg-amber-50 text-amber-600 border-amber-200 animate-pulse' 
-                    : 'bg-white hover:bg-blue-50 text-blue-600 hover:text-blue-700 border-slate-200'
-                }`}
-                title="ค้นหาพิกัด GPS จริงปัจจุบันผ่านสัญญาณเบราว์เซอร์"
-              >
-                <Compass size={14} className={isLocating ? 'animate-spin' : ''} />
-                <span>{isLocating ? 'กําลังระบุ...' : 'พิกัด GPS ฉัน'}</span>
-              </button>
+              {/* Route Planning Toggle */}
+              <div id="route-planning-toggle" className="relative pointer-events-auto shrink-0 flex items-center justify-end">
+                <button 
+                  id="btn-toggle-route-mode"
+                  type="button"
+                  onClick={() => setIsRouteMode(!isRouteMode)}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl shadow-lg border font-bold text-xs cursor-pointer transition-all ${
+                    isRouteMode 
+                      ? 'bg-amber-500 text-white border-amber-600 shadow-amber-500/30' 
+                      : 'bg-white/95 backdrop-blur-md text-slate-700 border-slate-200 hover:text-amber-600'
+                  }`}
+                  title="วางแผนเส้นทางหลายจุด"
+                >
+                  <Navigation size={14} className={isRouteMode ? 'text-white' : 'text-amber-500'} />
+                  <span className="relative">
+                    วางแผนเส้นทาง
+                    {routePoints.length > 0 && (
+                      <span className="absolute -top-3 -right-3 bg-red-500 text-white text-[9px] w-4 h-4 flex items-center justify-center rounded-full border border-white">
+                        {routePoints.length}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              </div>
 
             </div>
 
@@ -2107,7 +2820,7 @@ export default function App() {
 
           {/* Quick coordinates Go-To search feedback alert */}
           {quickCoordinatesError && (
-            <div id="quick-coords-error-alert" className="absolute top-16 left-4 z-[9999] bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-lg animate-fadeIn flex items-center gap-1.5 pointer-events-auto">
+            <div id="quick-coords-error-alert" className="absolute top-16 left-4 z-[999] bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-lg animate-fadeIn flex items-center gap-1.5 pointer-events-auto">
               <AlertCircle size={13} className="text-rose-500 shrink-0" />
               <span>{quickCoordinatesError}</span>
               <button id="close-quick-error" className="ml-2 hover:text-rose-900 cursor-pointer" onClick={() => setQuickCoordinatesError('')}>
@@ -2116,6 +2829,33 @@ export default function App() {
             </div>
           )}
 
+          {/* Tile Layer Selector */}
+          <div className="absolute top-4 right-4 z-[999] pointer-events-auto">
+            <div className="relative group">
+              <button className="bg-white/90 backdrop-blur-md p-2.5 rounded-xl shadow-lg border border-slate-200 text-slate-700 hover:text-blue-600 transition-colors flex items-center justify-center cursor-pointer">
+                <Layers size={20} />
+              </button>
+              <div className="absolute right-0 top-full mt-2 w-48 bg-white/95 backdrop-blur-xl rounded-xl shadow-2xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 transform origin-top-right overflow-hidden">
+                <div className="p-2 space-y-1">
+                  {Object.entries(TILE_LAYERS).map(([key, style]) => (
+                    <button
+                      key={key}
+                      onClick={() => setTileStyle(key as keyof typeof TILE_LAYERS)}
+                      className={`w-full text-left px-3 py-2 text-[11px] font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-2 ${
+                        tileStyle === key 
+                          ? 'bg-blue-50 text-blue-600' 
+                          : 'hover:bg-slate-50 text-slate-600'
+                      }`}
+                    >
+                      <div className={`w-2 h-2 rounded-full ${tileStyle === key ? 'bg-blue-600' : 'bg-slate-300'}`}></div>
+                      {style.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Core Leaflet Mount canvas div wrapper */}
           <div 
             id="map-container"
@@ -2123,6 +2863,141 @@ export default function App() {
             className="w-full h-full z-0 relative"
             style={{ cursor: 'pointer' }}
           ></div>
+
+          {/* Route Planning Overlay Panel */}
+          <AnimatePresence>
+            {isRouteMode && (
+              <motion.div
+                initial={{ x: -300, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -300, opacity: 0 }}
+                className="absolute left-4 bottom-20 z-[1001] w-80 bg-white shadow-2xl rounded-2xl border border-slate-200 overflow-hidden flex flex-col pointer-events-auto"
+              >
+                <div className="bg-slate-900 text-white p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Navigation size={16} className="text-amber-400" />
+                    <h3 className="text-sm font-bold">การวางแผนทริปเส้นทาง</h3>
+                  </div>
+                  <button 
+                    onClick={() => setIsRouteMode(false)}
+                    className="p-1 hover:bg-slate-800 rounded-lg transition"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+
+                <div className="p-4 flex-1 max-h-[400px] overflow-y-auto space-y-3">
+                  {routePoints.length === 0 ? (
+                    <div className="text-center py-8 text-slate-400 space-y-2">
+                      <MapPinned size={32} className="mx-auto opacity-20" />
+                      <p className="text-xs font-semibold">ยังไม่มีจุดพิกัดในเส้นทาง</p>
+                      <p className="text-[10px]">เลือกจุดพิกัดจากแผนที่หรือรายการเพื่อเพิ่ม</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {routePoints.map((point, index) => (
+                        <div 
+                          key={`${point.id}-${index}`}
+                          className="flex items-center gap-2 bg-slate-50 p-2 rounded-xl border border-slate-100 group"
+                        >
+                          <div className="flex flex-col items-center gap-1">
+                            <span className="text-[10px] font-bold text-slate-400">{index + 1}</span>
+                            <div className="w-0.5 h-4 bg-slate-200 group-last:hidden"></div>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1 text-[10px] font-bold text-slate-800 truncate">
+                              <span>{getCategoryEmoji(point.category)}</span>
+                              <span className="truncate">{point.name}</span>
+                            </div>
+                            <div className="text-[9px] text-slate-400 truncate">
+                              {point.tambon ? `ต.${point.tambon}` : 'ไม่ระบุตำบล'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+                            <button 
+                              onClick={() => {
+                                const newPoints = [...routePoints];
+                                if (index > 0) {
+                                  [newPoints[index - 1], newPoints[index]] = [newPoints[index], newPoints[index - 1]];
+                                  setRoutePoints(newPoints);
+                                }
+                              }}
+                              className="p-1 text-slate-400 hover:text-blue-600 rounded bg-white shadow-sm"
+                              disabled={index === 0}
+                            >
+                              <ChevronRight size={12} className="-rotate-90" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const newPoints = [...routePoints];
+                                if (index < routePoints.length - 1) {
+                                  [newPoints[index + 1], newPoints[index]] = [newPoints[index], newPoints[index + 1]];
+                                  setRoutePoints(newPoints);
+                                }
+                              }}
+                              className="p-1 text-slate-400 hover:text-blue-600 rounded bg-white shadow-sm"
+                              disabled={index === routePoints.length - 1}
+                            >
+                              <ChevronRight size={12} className="rotate-90" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                setRoutePoints(prev => prev.filter((_, i) => i !== index));
+                              }}
+                              className="p-1 text-slate-400 hover:text-rose-600 rounded bg-white shadow-sm"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {routeDistance !== null && (
+                    <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 flex justify-around items-center">
+                      <div className="text-center">
+                        <span className="block text-[9px] text-blue-400 uppercase font-bold tracking-wider">ระยะทางรวม</span>
+                        <span className="text-sm font-black text-blue-700">{(routeDistance / 1000).toFixed(2)} กม.</span>
+                      </div>
+                      <div className="w-px h-6 bg-blue-200"></div>
+                      <div className="text-center">
+                        <span className="block text-[9px] text-blue-400 uppercase font-bold tracking-wider">เวลาโดยประมาณ</span>
+                        <span className="text-sm font-black text-blue-700">{Math.round(routeDuration! / 60)} นาที</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="p-4 bg-slate-50 border-t border-slate-100 flex gap-2">
+                  <button 
+                    onClick={() => {
+                      setRoutePoints([]);
+                      setIsRouteMode(false);
+                    }}
+                    className="flex-1 px-3 py-2 bg-white border border-slate-200 text-slate-600 font-bold text-xs rounded-lg hover:bg-slate-100 transition shadow-sm"
+                  >
+                    ล้างทั้งหมด
+                  </button>
+                  <button 
+                    disabled={routePoints.length < 2}
+                    onClick={() => {
+                      const coords = routePoints.map(p => `${p.lat},${p.lng}`).join('/');
+                      window.open(`https://www.google.com/maps/dir/${coords}`, '_blank');
+                    }}
+                    className={`flex-[2] px-3 py-2 font-bold text-xs rounded-lg transition shadow-md flex items-center justify-center gap-1.5 ${
+                      routePoints.length >= 2 
+                        ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                        : 'bg-slate-300 text-slate-100 cursor-not-allowed'
+                    }`}
+                  >
+                    <Navigation size={14} />
+                    <span>นำทางผ่าน Google</span>
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Lower HUD banner indicating coordinates of Bangkok */}
           <div 
@@ -2167,13 +3042,14 @@ export default function App() {
                   setFormName('');
                   setFormLat(selectedMapPoint.lat);
                   setFormLng(selectedMapPoint.lng);
-                  setFormCategory('Village');
+                  setFormCoords(`${selectedMapPoint.lat.toFixed(6)}, ${selectedMapPoint.lng.toFixed(6)}`);
+                  if (!lockType) setFormCategory('Village');
                   setFormNotes('');
                   setFormGoogleMapLink('');
-                  setFormSoi('');
-                  setFormMoo('');
-                  setFormTambon('');
-                  setFormAmphoe('');
+                  if (!lockSoi) setFormSoi('');
+                  if (!lockMoo) setFormMoo('');
+                  if (!lockTambon) setFormTambon('');
+                  if (!lockAmphoe) setFormAmphoe('');
                 }}
                 className="w-full flex items-center justify-center gap-1.5 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-md transition"
               >
@@ -2195,7 +3071,28 @@ export default function App() {
                     </span>
                   </div>
                   <h3 className="text-xs font-bold text-white truncate pt-1">{activeLocation.name}</h3>
-                  <p className="text-[10px] text-slate-400 font-mono">{activeLocation.lat.toFixed(5)}, {activeLocation.lng.toFixed(5)}</p>
+                  {userLocation && (
+                    <div className="text-[10px] font-bold text-emerald-400 mt-0.5 flex items-center gap-1">
+                      <Navigation size={10} className="text-emerald-400" />
+                      ห่างจากคุณ {(calculateDistanceKm(userLocation.lat, userLocation.lng, activeLocation.lat, activeLocation.lng) * 1000).toFixed(0)} เมตร
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <p className="text-[10px] text-slate-400 font-mono bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700/50">
+                      {activeLocation.lat.toFixed(6)}, {activeLocation.lng.toFixed(6)}
+                    </p>
+                    <button
+                      id="btn-copy-coords-mobile"
+                      onClick={() => {
+                        navigator.clipboard.writeText(`${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`);
+                        showToast('คัดลอกพิกัดเรียบร้อยแล้ว!', 'success');
+                      }}
+                      className="p-1 bg-slate-800 text-slate-300 hover:text-white rounded border border-slate-700 transition cursor-pointer flex items-center justify-center"
+                      title="คัดลอกพิกัด"
+                    >
+                      <Copy size={9} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-1.5 shrink-0">
@@ -2230,7 +3127,6 @@ export default function App() {
                   <div><span className="text-slate-500">ซอย:</span> {activeLocation.soi || '-'}</div>
                   <div><span className="text-slate-500">หมู่ที่:</span> {activeLocation.moo || '-'}</div>
                   <div className="col-span-2"><span className="text-slate-500">ตำบล:</span> {activeLocation.tambon || '-'}</div>
-                  <div className="col-span-2"><span className="text-slate-500">อำเภอ:</span> {activeLocation.amphoe || '-'}</div>
                 </div>
               </div>
 
@@ -2401,65 +3297,25 @@ export default function App() {
           </div>
 
           <form id="mobile-coordinate-crud-form" onSubmit={handleSaveForm} className="space-y-5">
-            {/* Name */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-slate-300">
-                ชื่อเรียกจุดพิกัดสถานที่ <span className="text-red-500">*</span>
-              </label>
-              <input 
-                id="mob-input-location-name"
-                type="text" 
-                required
-                value={formName}
-                onChange={(e) => setFormName(e.target.value)}
-                placeholder="เช่น คาเฟ่ยอดฮิต, วัดสระเกศ, อารีย์ ซอย 4" 
-                className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-white placeholder-slate-650"
-              />
-            </div>
-
-            {/* Coordinates Lat / Lng */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-slate-300">
-                  ละติจูด (Lat) <span className="text-red-500">*</span>
-                </label>
-                <input 
-                  id="mob-input-latitude"
-                  type="number" 
-                  step="any"
-                  required
-                  value={formLat}
-                  onChange={(e) => setFormLat(parseFloat(e.target.value))}
-                  placeholder="13.7563"
-                  className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-white placeholder-slate-650"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-slate-300">
-                  ลองจิจูด (Lng) <span className="text-red-500">*</span>
-                </label>
-                <input 
-                  id="mob-input-longitude"
-                  type="number" 
-                  step="any"
-                  required
-                  value={formLng}
-                  onChange={(e) => setFormLng(parseFloat(e.target.value))}
-                  placeholder="100.5018"
-                  className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-white placeholder-slate-650"
-                />
-              </div>
-            </div>
-
-            <div className="text-[11px] text-emerald-400/80 bg-emerald-950/40 p-2 rounded border border-emerald-800/30">
-              💡 พิกัดจะถูกปรับค่าทศนิยมออโตเมติกให้แม่นยำระดับควบคุม ± ไม่เกิน 5 เมตรก่อนส่งขึ้นฐานข้อมูลคลาวด์
-            </div>
-
             {/* Category */}
             <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-slate-300">
-                เลือกประเภทสถานที่และหมวดหมู่
-              </label>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-xs font-semibold text-slate-300">
+                  เลือกประเภทสถานที่และหมวดหมู่
+                </label>
+                <button 
+                  type="button" 
+                  onClick={() => setLockType(!lockType)} 
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full border transition-all text-[9px] font-bold ${
+                    lockType 
+                      ? 'bg-amber-500/20 border-amber-500/50 text-amber-400' 
+                      : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-400'
+                  } cursor-pointer`}
+                >
+                  {lockType ? <Lock size={10} /> : <Unlock size={10} />}
+                  <span>{lockType ? 'ล็อคแล้ว' : 'ไม่ล็อค'}</span>
+                </button>
+              </div>
               <div className="grid grid-cols-4 gap-2">
                 {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
                   const isSelected = formCategory === cat;
@@ -2486,104 +3342,132 @@ export default function App() {
             </div>
 
             {/* GET CURRENT LOCATION BUTTON FOR MOBILE */}
-            <div>
+            <div className="flex gap-2">
               <button
                 id="mob-btn-form-get-current"
                 type="button"
                 onClick={handleGetCurrentLocationForForm}
-                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white font-bold text-xs py-3 px-4 rounded-xl transition shadow cursor-pointer active:scale-98"
+                className="flex-1 flex items-center justify-center gap-2 bg-slate-800 text-white font-bold text-xs py-3 px-4 rounded-xl transition shadow cursor-pointer active:scale-98"
               >
                 <MapPin size={14} className="text-[#FF6B00]" />
                 <span>ตำแหน่งปัจจุบัน</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setLockGps(!lockGps)}
+                className={`px-4 py-3 rounded-xl border transition-all flex items-center gap-2 ${
+                  lockGps 
+                    ? 'bg-amber-500 border-amber-600 text-white shadow-lg' 
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+                } cursor-pointer`}
+              >
+                {lockGps ? <Lock size={14} /> : <Unlock size={14} />}
+                <span className="text-[10px] font-bold">{lockGps ? 'ล็อคค่า' : 'ล็อค'}</span>
+              </button>
             </div>
 
-            {/* NAVIGATION BUTTON BELOW LONGITUDE FOR MOBILE */}
-            {formLat !== '' && formLng !== '' && !isNaN(Number(formLat)) && !isNaN(Number(formLng)) && (
-              <div>
-                <a
-                  id="mob-btn-form-navigate-gmap"
-                  href={formGoogleMapLink ? formGoogleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${formLat},${formLng}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-3 px-4 rounded-xl transition shadow text-center cursor-pointer"
-                >
-                  <Navigation size={14} />
-                  <span>ปุ่มนำทาง (Google Map)</span>
-                </a>
-              </div>
-            )}
-
-            {/* Add Google Maps Link input */}
+            {/* Name */}
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-slate-300">
-                กรอก Link GoogleMap
+                ชื่อเรียกจุดพิกัดสถานที่ <span className="text-red-500">*</span>
               </label>
               <input 
-                id="mob-input-google-map-link"
-                type="url" 
-                value={formGoogleMapLink}
-                onChange={(e) => setFormGoogleMapLink(e.target.value)}
-                placeholder="เช่น https://goo.gl/maps/..." 
+                id="mob-input-location-name"
+                type="text" 
+                required
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                placeholder="เช่น คาเฟ่ยอดฮิต, วัดสระเกศ, อารีย์ ซอย 4" 
                 className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-white placeholder-slate-650"
               />
             </div>
 
             {/* Thailand Specific Address Information Grid (Soi, Moo, Tambon, Amphoe) FOR MOBILE */}
             <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4 space-y-3">
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block border-b border-slate-800 pb-2">ข้อมูลที่อยู่สอดคล้องประเทศไทย</span>
+              <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest block border-b border-slate-800 pb-2 flex justify-between items-center">
+                <span>🏢 ข้อมูลที่อยู่ประเทศไทย</span>
+                <span className="text-[9px] text-amber-400 font-normal normal-case">คลิกรูปกุญแจเพื่อล็อคค่าคงเดิมได้</span>
+              </span>
               
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="block text-[10px] font-bold text-slate-300">ชื่อซอย (Soi)</label>
-                  <input 
-                    id="mob-input-soi"
-                    type="text"
-                    value={formSoi}
-                    onChange={(e) => setFormSoi(e.target.value)}
-                    placeholder="เช่น ซอยมิตรไมตรี" 
-                    className="w-full text-xs px-3 py-2 bg-slate-950 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] text-white"
-                  />
+                  <div className="relative flex items-center">
+                    <input 
+                      id="mob-input-soi"
+                      type="text"
+                      value={formSoi}
+                      onChange={(e) => setFormSoi(e.target.value)}
+                      placeholder="เช่น ซอยมิตรไมตรี" 
+                      className="w-full text-xs pl-3 pr-8 py-2 bg-slate-950 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500 text-white"
+                    />
+                    <button 
+                      type="button" 
+                      onClick={() => setLockSoi(!lockSoi)} 
+                      className={`absolute right-2 p-1 transition-all ${
+                        lockSoi 
+                          ? 'text-amber-400 scale-110' 
+                          : 'text-slate-600 hover:text-slate-400'
+                      } cursor-pointer`}
+                      title={lockSoi ? "ปลดล็อคซอย" : "ล็อคข้อมูลซอยนี้"}
+                    >
+                      {lockSoi ? <Lock size={12} /> : <Unlock size={12} />}
+                    </button>
+                  </div>
                 </div>
                 <div className="space-y-1">
                   <label className="block text-[10px] font-bold text-slate-300">หมู่ที่ (Moo)</label>
-                  <input 
-                    id="mob-input-moo"
-                    type="text"
-                    value={formMoo}
-                    onChange={(e) => setFormMoo(e.target.value)}
-                    placeholder="เช่น หมู่ 3" 
-                    className="w-full text-xs px-3 py-2 bg-slate-955 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] text-white"
-                  />
+                  <div className="relative flex items-center">
+                    <input 
+                      id="mob-input-moo"
+                      type="text"
+                      value={formMoo}
+                      onChange={(e) => setFormMoo(e.target.value)}
+                      placeholder="เช่น หมู่ 3" 
+                      className="w-full text-xs pl-3 pr-8 py-2 bg-[#1b1c24] border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500 text-white"
+                    />
+                    <button 
+                      type="button" 
+                      onClick={() => setLockMoo(!lockMoo)} 
+                      className={`absolute right-2 p-1 transition-all ${
+                        lockMoo 
+                          ? 'text-amber-400 scale-110' 
+                          : 'text-slate-600 hover:text-slate-400'
+                      } cursor-pointer`}
+                      title={lockMoo ? "ปลดล็อคหมู่" : "ล็อคข้อมูลหมู่นี้"}
+                    >
+                      {lockMoo ? <Lock size={12} /> : <Unlock size={12} />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-bold text-slate-300">ตำบล/แขวง (Tambon)</label>
+              <div className="space-y-1.5">
+                <label className="block text-[12px] font-bold text-slate-300">ตำบล (Tambon) - จังหวัดนนทบุรี</label>
+                <div className="relative flex items-center">
                   <select 
                     id="mob-input-tambon"
                     value={formTambon}
                     onChange={(e) => setFormTambon(e.target.value)}
-                    className="w-full text-xs px-3 py-2 bg-slate-950 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] text-white appearance-none cursor-pointer"
+                    className="w-full text-xs pl-3 pr-8 py-2.5 bg-slate-950 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500 text-white appearance-none cursor-pointer"
                   >
-                    <option value="">-- เลือกตำบล/แขวง --</option>
-                    <option value="บางเลน">บางเลน</option>
-                    <option value="บางใหญ่">บางใหญ่</option>
-                    <option value="บางม่วง">บางม่วง</option>
-                    <option value="เสาธงหิน">เสาธงหิน</option>
+                    <option value="">-- เลือกตำบล --</option>
+                    {NONTHABURI_TAMBONS.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
                   </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-bold text-slate-300">เขต/อำเภอ (Amphoe)</label>
-                  <input 
-                    id="mob-input-amphoe"
-                    type="text"
-                    value={formAmphoe}
-                    onChange={(e) => setFormAmphoe(e.target.value)}
-                    placeholder="เช่น เขตพญาไท" 
-                    className="w-full text-xs px-3 py-2 bg-slate-950 border border-slate-800/85 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#FF6B00] text-white"
-                  />
+                  <button 
+                    type="button" 
+                    onClick={() => setLockTambon(!lockTambon)} 
+                    className={`absolute right-2 p-1 transition-all ${
+                      lockTambon 
+                        ? 'text-amber-400 scale-110' 
+                        : 'text-slate-600 hover:text-slate-400'
+                    } cursor-pointer`}
+                    title={lockTambon ? "ปลดล็อคตำบล" : "ล็อคข้อมูลตำบลนี้"}
+                  >
+                    {lockTambon ? <Lock size={12} /> : <Unlock size={12} />}
+                  </button>
                 </div>
               </div>
             </div>
@@ -2602,6 +3486,66 @@ export default function App() {
                 className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 leading-relaxed text-white placeholder-slate-650"
               />
             </div>
+
+            {/* Add Google Maps Link input */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-300">
+                กรอก Link GoogleMap
+              </label>
+              <input 
+                id="mob-input-google-map-link"
+                type="url" 
+                value={formGoogleMapLink}
+                onChange={(e) => setFormGoogleMapLink(e.target.value)}
+                placeholder="เช่น https://goo.gl/maps/..." 
+                className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium text-white placeholder-slate-650"
+              />
+            </div>
+
+            {/* Merged Coordinates Input (Mobile View) */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-300">
+                พิกัด (ละติจูด, ลองจิจูด) <span className="text-red-500">*</span>
+              </label>
+              <input 
+                id="mob-input-coordinates"
+                type="text" 
+                required
+                value={formCoords}
+                onChange={(e) => handleCoordsInputChange(e.target.value)}
+                placeholder="เช่น 13.7563, 100.5018"
+                className="w-full text-sm px-4 py-3 bg-slate-900 border border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-white placeholder-slate-650"
+              />
+              {formLat !== '' && formLng !== '' && !isNaN(Number(formLat)) && !isNaN(Number(formLng)) ? (
+                <span className="text-[10px] text-emerald-400 font-mono block mt-1">
+                  ✓ แยกสำเร็จ: {Number(formLat).toFixed(6)}, {Number(formLng).toFixed(6)}
+                </span>
+              ) : formCoords.trim() !== '' ? (
+                <span className="text-[10px] text-red-400 font-medium block mt-1">
+                  ✗ รูปแบบพิกัดไม่ถูกต้อง
+                </span>
+              ) : null}
+            </div>
+
+            <div className="text-[11px] text-emerald-400/80 bg-emerald-950/40 p-2 rounded border border-emerald-800/30">
+              💡 พิกัดจะถูกปรับค่าทศนิยมออโตเมติกให้แม่นยำระดับควบคุม ± ไม่เกิน 5 เมตรก่อนส่งขึ้นฐานข้อมูลคลาวด์
+            </div>
+
+            {/* NAVIGATION BUTTON BELOW LONGITUDE FOR MOBILE */}
+            {formLat !== '' && formLng !== '' && !isNaN(Number(formLat)) && !isNaN(Number(formLng)) && (
+              <div>
+                <a
+                  id="mob-btn-form-navigate-gmap"
+                  href={formGoogleMapLink ? formGoogleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${formLat},${formLng}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-3 px-4 rounded-xl transition shadow text-center cursor-pointer"
+                >
+                  <Navigation size={14} />
+                  <span>ปุ่มนำทาง (Google Map)</span>
+                </a>
+              </div>
+            )}
 
             {/* Save Form Buttons */}
             <div className="flex gap-3 pt-4 border-t border-slate-800 mt-6 pb-12">
@@ -2668,6 +3612,11 @@ export default function App() {
                         <span className="text-[10px] text-blue-400 font-mono">{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</span>
                       </div>
                       <h4 className="text-xs font-bold text-white truncate">{loc.name}</h4>
+                      {userLocation && (loc as any).dist !== undefined && (
+                        <div className="text-[9px] font-bold text-emerald-500 mt-1 flex items-center gap-1">
+                          <Navigation size={9} /> ห่าง {( (loc as any).dist * 1000 ).toFixed(0)} ม.
+                        </div>
+                      )}
                       <p className="text-[10px] text-slate-400 italic line-clamp-1 mt-0.5">
                         {loc.notes || 'ยังไม่มีบันทึกโน้ตย่อย...'}
                       </p>
@@ -2770,17 +3719,16 @@ export default function App() {
                 
                 <div className="space-y-1.5">
                   {[
-                    { label: '🏕️ ท่องเที่ยว (Travel)', value: statsSummary.categoriesCount.Travel, color: 'bg-emerald-500' },
-                    { label: '🍔 ของอร่อย / คาเฟ่ (Food)', value: statsSummary.categoriesCount.Food, color: 'bg-rose-500' },
-                    { label: '💼 ที่ทำงาน (Work)', value: statsSummary.categoriesCount.Work, color: 'bg-blue-500' },
-                    { label: '🏠 ที่พักอาศัย (Home)', value: statsSummary.categoriesCount.Home, color: 'bg-amber-500' },
-                    { label: '📍 อื่นๆ (Custom)', value: statsSummary.categoriesCount.Custom, color: 'bg-purple-500' },
+                    { label: 'หมู่บ้าน (Village)', value: statsSummary.categoriesCount.Village || 0, color: 'bg-emerald-500', icon: <Home size={14} className="text-emerald-500 mr-1.5 inline" /> },
+                    { label: 'ชุมชน (Community)', value: statsSummary.categoriesCount.Community || 0, color: 'bg-blue-500', icon: <Users size={14} className="text-blue-500 mr-1.5 inline" /> },
+                    { label: 'สำนักงาน (Office)', value: statsSummary.categoriesCount.Office || 0, color: 'bg-rose-500', icon: <Building2 size={14} className="text-rose-500 mr-1.5 inline" /> },
+                    { label: 'คอนโด (Condo)', value: statsSummary.categoriesCount.Condo || 0, color: 'bg-amber-500', icon: <MapPinned size={14} className="text-amber-500 mr-1.5 inline" /> },
                   ].map((categoryItem, i) => {
                     const pct = statsSummary.total > 0 ? Math.round((categoryItem.value / statsSummary.total) * 100) : 0;
                     return (
                       <div key={i} className="text-xs">
                         <div className="flex items-center justify-between text-[11px] mb-0.5">
-                          <span className="text-[#9BA1B0] font-semibold">{categoryItem.label}</span>
+                          <span className="text-[#9BA1B0] font-semibold">{categoryItem.icon}{categoryItem.label}</span>
                           <span className="text-white font-mono font-bold">{categoryItem.value} จุด ({pct}%)</span>
                         </div>
                         <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -2915,7 +3863,7 @@ export default function App() {
             
             <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
               <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shrink-0">
-                <span className="text-xl">✨</span>
+                <Sparkles className="w-5 h-5 text-emerald-400" />
               </div>
               <div>
                 <h3 className="text-sm font-bold text-white">
@@ -2943,14 +3891,13 @@ export default function App() {
               </div>
 
               <div className="pt-2 border-t border-slate-800/40">
-                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">ที่อยู่พิกัดไทย:</span>
-                {formSoi || formMoo || formTambon || formAmphoe ? (
+                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">ที่อยู่พิกัดไทย (จ.นนทบุรี):</span>
+                {formSoi || formMoo || formTambon ? (
                   <span className="text-slate-300 leading-relaxed block text-xs bg-slate-900/50 p-2 rounded-lg border border-slate-800/60 mt-1">
                     {[
                       formSoi ? `ซอย${formSoi}` : '',
                       formMoo ? `หมู่ที่ ${formMoo}` : '',
-                      formTambon ? `ตำบล/แขวง${formTambon}` : '',
-                      formAmphoe ? `อำเภอ/เขต${formAmphoe}` : ''
+                      formTambon ? `ตำบล${formTambon}` : ''
                     ].filter(Boolean).join(' ')}
                   </span>
                 ) : (
@@ -2981,6 +3928,87 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* 7. Custom Delete Confirmation Modal (Thai translation: ยืนยันการลบพิกัดสะสม) */}
+      {deleteTargetId && (
+        <div id="delete-confirm-modal-overlay" className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[1300] animate-fadeIn">
+          <div className="bg-[#111218] border border-rose-500/30 rounded-[24px] max-w-sm w-full p-6 text-[#D8DADF] shadow-2xl relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-rose-500 to-orange-500"></div>
+            
+            <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center shrink-0">
+                <span className="text-xl">⚠️</span>
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  คำเตือน: ยืนยันการลบข้อมูล
+                </h3>
+                <p className="text-[10px] text-slate-400">การลบนี้เป็นแบบถาวรและไม่สามารถกู้คืนกลับมาได้อีก</p>
+              </div>
+            </div>
+
+            <div className="py-4 space-y-2">
+              <p className="text-xs text-slate-300 leading-relaxed animate-pulse">
+                คุณแน่ใจหรือไม่ว่าต้องการลบพิกัดตำแหน่งสถานที่นี้? ข้อมูลในระดับฐานข้อมูลและสัญลักษณ์การปักหมุดบนแผนที่จะถูกทำลายอย่างถาวรทันที
+              </p>
+              {locations.find(l => l.id === deleteTargetId) && (
+                <div className="bg-rose-950/20 border border-rose-500/20 rounded-xl p-3 mt-2">
+                  <span className="text-[9px] text-rose-400 font-bold block uppercase tracking-wider">ตำแหน่งที่จะถูกลบ:</span>
+                  <span className="text-xs font-bold text-white block mt-0.5 truncate">
+                    {locations.find(l => l.id === deleteTargetId)?.name}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">
+                    Lat: {locations.find(l => l.id === deleteTargetId)?.lat.toFixed(5)}, Lng: {locations.find(l => l.id === deleteTargetId)?.lng.toFixed(5)}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2.5 pt-3 border-t border-slate-800/30">
+              <button
+                id="btn-confirm-delete-agree"
+                type="button"
+                onClick={handleConfirmDelete}
+                className="flex-1 py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow transition duration-200 cursor-pointer text-center"
+              >
+                ยืนยันการลบถาวร 🗑️
+              </button>
+              <button
+                id="btn-confirm-delete-cancel"
+                type="button"
+                onClick={() => setDeleteTargetId(null)}
+                className="py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-[#D8DADF] font-bold text-xs rounded-xl transition duration-200 cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* 8. Toast Notifications */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className={`fixed bottom-24 left-1/2 -translate-x-1/2 z-[2000] px-4 py-2.5 rounded-full shadow-2xl border flex items-center gap-2 font-bold text-xs ${
+              toast.type === 'success' 
+                ? 'bg-emerald-500 text-white border-emerald-400' 
+                : toast.type === 'error'
+                  ? 'bg-rose-500 text-white border-rose-400'
+                  : 'bg-blue-600 text-white border-blue-500'
+            }`}
+          >
+            {toast.type === 'success' && <CheckCircle2 size={14} />}
+            {toast.type === 'error' && <AlertCircle size={14} />}
+            {toast.type === 'info' && <Info size={14} />}
+            <span>{toast.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );
