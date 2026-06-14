@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
-import { initializeFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, setDoc, serverTimestamp } from 'firebase/firestore';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, setDoc, serverTimestamp } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Detect mock config
@@ -13,8 +13,13 @@ if (getApps().length === 0) {
 }
 
 // 🚀 Use initializeFirestore with explicit long polling to bypass iframe/proxy websocket constraints
+// And enable robust persistent local cache with multi-tab manager for offline stability
 export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  }),
   experimentalForceLongPolling: true
 }, firebaseConfig.firestoreDatabaseId);
 
 export { collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, setDoc, serverTimestamp };
+

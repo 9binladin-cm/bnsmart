@@ -7,33 +7,74 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import L from 'leaflet';
 
 // PATCH LEAFLET TO PREVENT CRASH
+const OriginalLatLngClass = L.LatLng;
 const originalLatLng = L.latLng;
+
 (L as any).latLng = function (...args: any[]) {
   try {
-    let lat = args[0], lng = args[1];
-    if (Array.isArray(args[0])) { lat = args[0][0]; lng = args[0][1]; }
-    else if (typeof args[0] === 'object' && args[0] !== null) { lat = args[0].lat; lng = args[0].lng; }
-    if (isNaN(lat) || isNaN(lng) || lat === undefined || lng === undefined) {
-      console.warn('Leaflet prevented NaN crash. args:', args);
+    let hasNaN = false;
+    const first = args[0];
+    if (Array.isArray(first)) {
+      const val0 = parseFloat(String(first[0]));
+      const val1 = parseFloat(String(first[1]));
+      if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+    } else if (typeof first === 'object' && first !== null) {
+      if (first instanceof OriginalLatLngClass) {
+        return first;
+      }
+      const latVal = 'lat' in first ? first.lat : (typeof (first as any).lat === 'function' ? (first as any).lat() : NaN);
+      const lngVal = 'lng' in first ? first.lng : ('lon' in first ? first.lon : (typeof (first as any).lng === 'function' ? (first as any).lng() : NaN));
+      const val0 = parseFloat(String(latVal));
+      const val1 = parseFloat(String(lngVal));
+      if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+    } else {
+      const val0 = parseFloat(String(args[0]));
+      const val1 = parseFloat(String(args[1]));
+      if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+    }
+
+    if (hasNaN) {
+      console.warn("L.latLng prevented NaN crash:", args);
       return originalLatLng(0, 0);
     }
     return originalLatLng.apply(this, args);
   } catch(e) {
-    console.warn("Leaflet patch caught error", e, args);
+    console.warn("L.latLng catch handler prevented crash:", e);
     return originalLatLng(0, 0);
   }
 };
 
-const OriginalLatLngClass = L.LatLng;
-(L as any).LatLng = function (lat: any, lng: any, alt?: any) {
-  if (isNaN(lat) || isNaN(lng)) {
-    console.warn("Leaflet LatLng constructor prevented NaN crash:", lat, lng);
+(L as any).LatLng = function (latOrObj: any, lng?: any, alt?: any) {
+  let hasNaN = false;
+  if (Array.isArray(latOrObj)) {
+    const val0 = parseFloat(String(latOrObj[0]));
+    const val1 = parseFloat(String(latOrObj[1]));
+    if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+  } else if (typeof latOrObj === 'object' && latOrObj !== null) {
+    if (latOrObj instanceof OriginalLatLngClass) {
+      return latOrObj;
+    }
+    const latVal = 'lat' in latOrObj ? latOrObj.lat : NaN;
+    const lngVal = 'lng' in latOrObj ? latOrObj.lng : ('lon' in latOrObj ? latOrObj.lon : NaN);
+    const val0 = parseFloat(String(latVal));
+    const val1 = parseFloat(String(lngVal));
+    if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+  } else {
+    const val0 = parseFloat(String(latOrObj));
+    const val1 = parseFloat(String(lng));
+    if (isNaN(val0) || isNaN(val1) || !isFinite(val0) || !isFinite(val1)) hasNaN = true;
+  }
+
+  if (hasNaN) {
+    console.warn("Leaflet LatLng constructor prevented NaN/invalid crash. args:", latOrObj, lng);
     return new OriginalLatLngClass(0, 0, alt);
   }
-  return new OriginalLatLngClass(lat, lng, alt);
-}
-Object.assign((L as any).LatLng, OriginalLatLngClass);
+
+  return new OriginalLatLngClass(latOrObj, lng, alt);
+};
+
 (L as any).LatLng.prototype = OriginalLatLngClass.prototype;
+Object.assign((L as any).LatLng, OriginalLatLngClass);
 
 const originalMarker = L.marker;
 (L as any).marker = function (latlng: any, options: any) {
@@ -83,7 +124,8 @@ import {
   Building2,
   Home,
   Users,
-  Clock
+  Clock,
+  Share2
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { motion, AnimatePresence } from 'motion/react';
@@ -186,7 +228,20 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   // 1. Core State for Bookmarks Data
-  const [locations, setLocations] = useState<BookmarkLocation[]>([]);
+  const [locations, setLocations] = useState<BookmarkLocation[]>(() => {
+    try {
+      const cached = localStorage.getItem('cached_landmarks_50');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to load locations from localStorage cache:', e);
+    }
+    return [];
+  });
+
+  const [showPlaylistTodayModal, setShowPlaylistTodayModal] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
@@ -194,6 +249,7 @@ export default function App() {
   const [mooFilter, setMooFilter] = useState<string>('All');
   const [sortMode, setSortMode] = useState<'date' | 'name' | 'distance'>('date');
   const [activeLocationId, setActiveLocationId] = useState<string | null>(null);
+  const [selectedLocationIds, setSelectedLocationIds] = useState<string[]>([]);
 
   // Distance calculating helper
   const calculateDistanceKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
@@ -206,6 +262,14 @@ export default function App() {
       Math.sin(dLng/2) * Math.sin(dLng/2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     return R * c;
+  };
+
+  const getDistanceString = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const distKm = calculateDistanceKm(lat1, lng1, lat2, lng2);
+    if (distKm < 1) {
+      return `${(distKm * 1000).toFixed(0)} ม.`;
+    }
+    return `${distKm.toFixed(2)} กม.`;
   };
 
   // Map settings state
@@ -307,6 +371,45 @@ export default function App() {
     });
   };
 
+  // 🔗 Share entire Location Card beautifully
+  const handleShareCard = async (loc: BookmarkLocation) => {
+    const categoryName = getCategoryNameTh(loc.category);
+    const categoryEmoji = getCategoryEmoji(loc.category);
+    const mapLink = loc.googleMapLink || `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+    const addressDetails = [
+      loc.soi ? `ซอย: ${loc.soi}` : '',
+      loc.moo ? `หมู่: ${loc.moo}` : '',
+      loc.tambon ? `ตำบล: ${loc.tambon}` : '',
+      loc.amphoe ? `อำเภอ: ${loc.amphoe}` : ''
+    ].filter(Boolean).join(' ');
+
+    const shareText = `📌 [แชร์ข้อมูลพิกัดจัดเก็บ]
+🏡 ชื่อสถานที่: ${loc.name}
+📂 ประเภท: ${categoryEmoji} ${categoryName}
+📍 พิกัด GPS: ${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}
+📮 ที่อยู่: ${addressDetails || 'ไม่ได้ระบุ'}
+📝 บันทึกเพิ่มเติม: ${loc.notes || 'ไม่มี'}
+🌐 ลิงก์แผนที่นำทาง: ${mapLink}`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `แชร์พิกัด: ${loc.name}`,
+          text: shareText,
+          url: mapLink,
+        });
+        showToast('แชร์ข้อมูลพิกัดเรียบร้อยแล้ว!', 'success');
+      } catch (err) {
+        // user clicked cancel or it failed
+        navigator.clipboard.writeText(shareText);
+        showToast('คัดลอกข้อมูลการ์ดพิกัดไปยังคลิปบอร์ดแล้ว!', 'success');
+      }
+    } else {
+      navigator.clipboard.writeText(shareText);
+      showToast('คัดลอกข้อมูลการ์ดพิกัดไปยังคลิปบอร์ดแล้ว!', 'success');
+    }
+  };
+
   // QR Code generator state
   const [activeQrCodeUrl, setActiveQrCodeUrl] = useState<string | null>(null);
   const [showActiveQr, setShowActiveQr] = useState<boolean>(false);
@@ -372,6 +475,14 @@ export default function App() {
       // Sort lists by createdAt descending-most first
       list.sort((a, b) => b.createdAt - a.createdAt);
       setLocations(list);
+
+      // Cache the last 50 loaded locations to localStorage for offline access
+      try {
+        const top50 = list.slice(0, 50);
+        localStorage.setItem('cached_landmarks_50', JSON.stringify(top50));
+      } catch (e) {
+        console.warn('Failed to cache top 50 landmarks to localStorage:', e);
+      }
     }, (error) => {
       console.error('Firestore real-time sync failed:', error);
     });
@@ -535,9 +646,13 @@ export default function App() {
         maxBoundsViscosity: 0.8
       });
 
-      // Custom Zoom controls
-      L.control.zoom({
-        position: 'bottomright'
+      // Custom Zoom controls (disabled to favor premium Tailwind zoom controls)
+
+      // Add visual scale / ruler tool displaying current zoom scale in meters or kilometers
+      L.control.scale({
+        position: 'bottomleft',
+        metric: true,
+        imperial: false
       }).addTo(leafletMap);
 
       // Initial tile layer setup
@@ -577,7 +692,7 @@ export default function App() {
         setFormCoords(`${clickedLat}, ${clickedLng}`);
         if (!lockType) setFormCategory('Village');
         setFormNotes('');
-        setFormGoogleMapLink('');
+        setFormGoogleMapLink(`https://www.google.com/maps?q=${clickedLat},${clickedLng}`);
         if (!lockSoi) setFormSoi('');
         if (!lockMoo) setFormMoo('');
         if (!lockTambon) setFormTambon('');
@@ -616,25 +731,38 @@ export default function App() {
   // Custom marker generator with gorgeous HTML design (bypasses Vite leaflet icons build issue)
   const createCustomMarkerHtml = (category: string, isActive: boolean) => {
     const bgColors: Record<string, string> = {
-      Village: '#10b981', // emerald-500
-      Community: '#3b82f6', // blue-500
-      Office: '#f43f5e', // rose-500
-      Condo: '#f59e0b', // amber-500
+      Village: '#10B981', // Emerald
+      Community: '#3B82F6', // Blue
+      Office: '#F43F5E', // Rose
+      Condo: '#F59E0B', // Amber
     };
 
-    const color = bgColors[category] || '#ef4444';
+    const color = bgColors[category] || '#EF4444';
     const scaleClass = isActive ? 'scale-125 z-[9999]' : 'scale-100 hover:scale-110';
     const svgIcon = getCategorySvgString(category);
 
     return `
-      <div class="relative flex flex-col items-center justify-center transition-transform duration-300 transform origin-bottom ${scaleClass}" style="width: 36px; height: 44px; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3));">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="36" height="36" style="fill: ${color}; stroke: white; stroke-width: 1.5px; overflow: visible;">
-          <path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/>
+      <div class="relative flex flex-col items-center justify-center animate-marker-drop transition-all duration-300 transform origin-bottom ${scaleClass}" style="width: 40px; height: 50px;">
+        <!-- Glowing drop shadow pulse for active markers -->
+        ${isActive ? `
+          <div class="absolute -bottom-1.5 w-10 h-10 rounded-full bg-${category === 'Village' ? 'emerald' : category === 'Community' ? 'blue' : category === 'Office' ? 'rose' : 'amber'}-500/25 animate-ping -z-10 blur-[1px]"></div>
+          <div class="absolute -bottom-1.5 w-6 h-2 bg-black/40 rounded-[100%] blur-[2px] -z-10"></div>
+        ` : `
+          <div class="absolute -bottom-1 w-5 h-1.5 bg-black/20 rounded-[100%] blur-[1.5px] -z-10 font-sans"></div>
+        `}
+        
+        <!-- Google Maps Style solid teardrop pin -->
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 30" width="40" height="50" style="overflow: visible;">
+          <path d="M12 0C5.372 0 0 5.372 0 12c0 8.04 10.6 17.15 11.235 17.684a1.16 1.16 0 0 0 1.53 0C13.4 29.15 24 20.04 24 12 24 5.372 18.628 0 12 0" fill="#FFFFFF" opacity="0.35"/>
+          <path d="M12 1C5.925 1 1 5.925 1 12c0 7.37 9.8 15.86 11 16.86 1.2-1 11-9.49 11-16.86 0-6.075-4.925-11-11-11" fill="${color}"/>
+          <!-- Embedded circular white layout badge (just like Google Maps!) -->
+          <circle cx="12" cy="11.5" r="5.7" fill="#FFFFFF"/>
         </svg>
-        <div class="absolute" style="top: 8px; width: 14px; height: 14px; color: white;">
+
+        <!-- Category icon styled nicely inside the circle -->
+        <div class="absolute flex items-center justify-center" style="top: 8px; width: 12px; height: 12px; color: ${color};">
           ${svgIcon}
         </div>
-        ${isActive ? '<div class="absolute -bottom-1 w-6 h-2 bg-black/30 rounded-[100%] blur-[2px] -z-10 animate-pulse"></div>' : ''}
       </div>
     `;
   };
@@ -663,9 +791,9 @@ export default function App() {
       const icon = L.divIcon({
         html: customHtml,
         className: 'custom-location-pin-wrapper',
-        iconSize: [36, 36],
-        iconAnchor: [18, 18],
-        popupAnchor: [0, -18]
+        iconSize: [40, 50],
+        iconAnchor: [20, 50],
+        popupAnchor: [0, -50]
       });
 
       /* Strict marker coordinate normalization to prevent crashes */
@@ -842,11 +970,21 @@ export default function App() {
     
     // Check if bounds are valid
     if (bounds.isValid()) {
-      mapInstanceRef.current.flyToBounds(bounds, {
-        padding: [40, 40],
-        maxZoom: 16,
-        duration: 1.5
-      });
+      const sw = bounds.getSouthWest();
+      const ne = bounds.getNorthEast();
+      const isPoint = Math.abs(sw.lat - ne.lat) < 0.0001 && Math.abs(sw.lng - ne.lng) < 0.0001;
+
+      if (isPoint) {
+        mapInstanceRef.current.flyTo(sw, 15, {
+          duration: 1.5
+        });
+      } else {
+        mapInstanceRef.current.flyToBounds(bounds, {
+          padding: [40, 40],
+          maxZoom: 16,
+          duration: 1.5
+        });
+      }
     }
   }, [filteredLocations.length, tambonFilter, mooFilter, categoryFilter, searchQuery]);
 
@@ -907,10 +1045,20 @@ export default function App() {
         // Auto-zoom to fit the route
         const bounds = polyline.getBounds();
         if (bounds.isValid()) {
-          mapInstanceRef.current!.flyToBounds(bounds, {
-            padding: [50, 50],
-            duration: 1.5
-          });
+          const sw = bounds.getSouthWest();
+          const ne = bounds.getNorthEast();
+          const isPoint = Math.abs(sw.lat - ne.lat) < 0.0001 && Math.abs(sw.lng - ne.lng) < 0.0001;
+
+          if (isPoint) {
+            mapInstanceRef.current!.flyTo(sw, 15, {
+              duration: 1.5
+            });
+          } else {
+            mapInstanceRef.current!.flyToBounds(bounds, {
+              padding: [50, 50],
+              duration: 1.5
+            });
+          }
         }
 
       } catch (err) {
@@ -1193,6 +1341,7 @@ export default function App() {
         setFormLat(latVal);
         setFormLng(lngVal);
         setFormCoords(`${latVal}, ${lngVal}`);
+        setFormGoogleMapLink(`https://www.google.com/maps?q=${latVal},${lngVal}`);
         // Auto fetch
         fetchThaiAddressDetails(latVal, lngVal);
       },
@@ -1600,6 +1749,19 @@ export default function App() {
     return withoutLinks.slice(0, 5);
   }, [locations, userLocation]);
 
+  // Sorted Playlist Locations for Today's Work Queue (automatically sorted by proximity/distance ASC)
+  const sortedPlaylistLocations = useMemo(() => {
+    if (userLocation) {
+      return [...routePoints]
+        .map(l => ({
+          ...l,
+          dist: calculateDistanceKm(userLocation.lat, userLocation.lng, l.lat, l.lng)
+        }))
+        .sort((a, b) => a.dist - b.dist);
+    }
+    return routePoints;
+  }, [routePoints, userLocation]);
+
   return (
     <div id="app-root-container" className="flex flex-col lg:flex-row h-screen w-full select-none overflow-hidden bg-slate-50 text-slate-800">
       
@@ -1818,6 +1980,32 @@ export default function App() {
                   </span>
                   <span className="text-[9px] text-slate-400 font-medium block leading-tight">
                     ความเรียบร้อยของข้อมูลพิกัด
+                  </span>
+                </div>
+              </button>
+
+              {/* CARD 6: คิวงานวันนี้ (Today's Playlist/Route Queue) */}
+              <button 
+                id="dash-card-playlist"
+                onClick={() => {
+                  setShowPlaylistTodayModal(true);
+                }}
+                className="aspect-square bg-[#13141B]/90 hover:bg-[#1C1D26] border border-slate-800/60 hover:border-slate-700 text-[#D8DADF] rounded-[24px] p-5 flex flex-col items-center justify-between transition-all duration-350 hover:-translate-y-2 hover:shadow-2xl hover:shadow-amber-500/10 group cursor-pointer text-center relative"
+              >
+                {routePoints.length > 0 && (
+                  <span className="absolute top-4 right-4 bg-[#FF6B00] text-white text-xs font-black w-6 h-6 rounded-full flex items-center justify-center shadow-lg border-2 border-slate-900 animate-bounce">
+                    {routePoints.length}
+                  </span>
+                )}
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-500/15 to-yellow-500/5 border border-amber-500/30 flex items-center justify-center transition group-hover:scale-110 mt-2">
+                  <span className="text-3xl select-none">📅</span>
+                </div>
+                <div className="space-y-1 mt-auto w-full font-sans">
+                  <span className="text-sm font-bold text-white tracking-wide block">
+                    คิวงานวันนี้ ({routePoints.length})
+                  </span>
+                  <span className="text-[9px] text-[#A5ADC1] font-semibold block leading-tight">
+                    งาน/จุดพิกัดจัดเก็บที่แอดเข้า Playlist
                   </span>
                 </div>
               </button>
@@ -2370,12 +2558,22 @@ export default function App() {
                 <div className="mt-3.5 flex flex-col gap-2">
                   <div className="flex gap-2">
                     <button 
-                      id="btn-active-flyto"
-                      onClick={() => handleMapFocus(activeLocation.lat, activeLocation.lng, 15)}
-                      className="flex-1 flex items-center justify-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                      id="btn-active-playlist-add"
+                      onClick={() => {
+                        setRoutePoints(prev => {
+                          if (prev.find(p => p.id === activeLocation.id)) {
+                            showToast('พิกัดนี้อยู่ใน Playlist แล้ว', 'info');
+                            return prev;
+                          }
+                          showToast('เพิ่มพิกัดเข้า Playlist สำเร็จ!', 'success');
+                          return [...prev, activeLocation];
+                        });
+                        setIsRouteMode(true);
+                      }}
+                      className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
                     >
-                      <Navigation size={12} className="text-[#FF6B00]" />
-                      <span>บินไปยังพิกัด</span>
+                      <Plus size={12} className="text-white" />
+                      <span>บวก Playlist</span>
                     </button>
                     <a 
                       id="btn-active-external-navigate"
@@ -2389,17 +2587,11 @@ export default function App() {
                     </a>
                   </div>
                   <button 
-                    onClick={() => {
-                      setRoutePoints(prev => {
-                        if (prev.find(p => p.id === activeLocation.id)) return prev;
-                        return [...prev, activeLocation];
-                      });
-                      setIsRouteMode(true);
-                    }}
-                    className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                    onClick={() => handleShareCard(activeLocation)}
+                    className="w-full flex items-center justify-center gap-2 bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200 font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
                   >
-                    <Plus size={14} />
-                    <span>เพิ่มเข้าสู่การวางแผนเส้นทาง</span>
+                    <Share2 size={13} className="text-[#FF6B00]" />
+                    <span>แชร์ข้อมูลการ์ดทั้งใบ</span>
                   </button>
                 </div>
               </div>
@@ -2568,6 +2760,102 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Select All and Batch Actions Section */}
+              <div className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs">
+                <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-700 select-none">
+                  <input 
+                    type="checkbox"
+                    checked={filteredLocations.length > 0 && filteredLocations.every(l => selectedLocationIds.includes(l.id))}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        // Add select to filtered items
+                        setSelectedLocationIds(prev => {
+                          const nonFiltered = prev.filter(id => !filteredLocations.some(l => l.id === id));
+                          return [...nonFiltered, ...filteredLocations.map(l => l.id)];
+                        });
+                      } else {
+                        // Remove filtered items
+                        setSelectedLocationIds(prev => prev.filter(id => !filteredLocations.some(l => l.id === id)));
+                      }
+                    }}
+                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>เลือกทั้งหมด ({filteredLocations.length})</span>
+                </label>
+
+                {selectedLocationIds.length > 0 && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const selectedObjects = locations.filter(l => selectedLocationIds.includes(l.id));
+                        setRoutePoints(prev => {
+                          const newPoints = [...prev];
+                          let addedAny = false;
+                          selectedObjects.forEach(loc => {
+                            if (!newPoints.some(p => p.id === loc.id)) {
+                              newPoints.push(loc);
+                              addedAny = true;
+                            }
+                          });
+                          if (addedAny) {
+                            showToast(`เพิ่มเข้า Playlist สำเร็จ (${selectedObjects.length} จุด)!`, 'success');
+                          } else {
+                            showToast('พิกัดทั้งหมดนี้อยู่ใน Playlist แล้ว', 'info');
+                          }
+                          return newPoints;
+                        });
+                        setIsRouteMode(true);
+                      }}
+                      className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-1 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus size={10} />
+                      <span>บวก Playlist ({selectedLocationIds.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const selectedObjects = locations.filter(l => selectedLocationIds.includes(l.id));
+                        if (selectedObjects.length === 0) return;
+                        
+                        const shareText = `📌 [แชร์ชุดข้อมูลพิกัดที่เลือก] (${selectedObjects.length} รายการ)\n\n` + 
+                          selectedObjects.map((loc, index) => {
+                            const addr = [loc.soi ? `ซอย:${loc.soi}` : '', loc.moo ? `ม.${loc.moo}` : '', loc.tambon ? `ต.${loc.tambon}` : '', loc.amphoe ? `อ.${loc.amphoe}` : ''].filter(Boolean).join(' ');
+                            return `${index + 1}. ${getCategoryEmoji(loc.category)} ${loc.name}\n📍 พิกัด: ${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}\n📮 ที่อยู่: ${addr || '-'}\n📝 โน้ต: ${loc.notes || '-'}\n🌐 แผนที่: ${loc.googleMapLink || `https://www.google.com/maps?q=${loc.lat},${loc.lng}`}`;
+                          }).join('\n\n');
+
+                        if (navigator.share) {
+                          try {
+                            await navigator.share({
+                              title: 'แชร์ชุดพิกัด',
+                              text: shareText
+                            });
+                            showToast('แชร์พิกัดทั้งหมดสำเร็จ!', 'success');
+                          } catch (err) {
+                            navigator.clipboard.writeText(shareText);
+                            showToast('คัดลอกชุดพิกัดจัดเก็บเรียบร้อย!', 'success');
+                          }
+                        } else {
+                          navigator.clipboard.writeText(shareText);
+                          showToast('คัดลอกชุดพิกัดจัดเก็บเรียบร้อย!', 'success');
+                        }
+                      }}
+                      className="bg-[#FF6B00]/10 hover:bg-[#FF6B00]/20 text-[#FF6B00] border border-[#FF6B00]/20 px-2 py-1 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer"
+                    >
+                      <Share2 size={10} />
+                      <span>แชร์ทั้งหมด</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLocationIds([])}
+                      className="text-slate-400 hover:text-slate-600 text-[10px] font-bold"
+                    >
+                      ล้าง
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {filteredLocations.length === 0 ? (
                 <div id="empty-search-alert" className="text-center py-8 bg-white border border-slate-200 border-dashed rounded-xl px-4">
                   <span className="text-3xl block mb-2 opacity-60">🔮</span>
@@ -2593,7 +2881,26 @@ export default function App() {
                       }}
                       className={`p-3 rounded-xl cursor-pointer transition-all duration-200 group relative ${activeColorClass}`}
                     >
-                      <div className="flex items-start justify-between min-w-0">
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        {/* Checkbox for standard item selection */}
+                        <div 
+                          className="flex items-center pt-1.5 shrink-0"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input 
+                            type="checkbox"
+                            checked={selectedLocationIds.includes(loc.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedLocationIds(prev => [...prev, loc.id]);
+                              } else {
+                                setSelectedLocationIds(prev => prev.filter(id => id !== loc.id));
+                              }
+                            }}
+                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                          />
+                        </div>
+
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                             <span className="text-sm shrink-0">{getCategoryEmoji(loc.category)}</span>
@@ -2607,6 +2914,11 @@ export default function App() {
                             ) : (
                               <span className="inline-flex items-center gap-0.5 text-[8px] bg-slate-100 text-slate-500 px-1 py-0.5 rounded font-bold">
                                 <Clock className="w-2.5 h-2.5" /> รอลิงก์
+                              </span>
+                            )}
+                            {userLocation && (
+                              <span className="inline-flex items-center gap-0.5 text-[8px] bg-emerald-50 text-emerald-700 px-1 py-0.5 rounded font-semibold">
+                                <Navigation className="w-2 h-2 rotate-45" /> {getDistanceString(userLocation.lat, userLocation.lng, loc.lat, loc.lng)}
                               </span>
                             )}
                           </div>
@@ -2732,95 +3044,174 @@ export default function App() {
           }
         >
           
-          {/* UPPER MAP FLOATING SYSTEM - Overlays directly on top of Leaflet */}
+          {/* 1. GOOGLE MAPS STYLE FLOATING CONTROL DRAWER (TOP-LEFT) */}
           <div 
-            id="map-overlays-container" 
-            className={`absolute top-4 left-3 right-3 z-[1000] flex ${isMobile ? 'flex-col gap-2' : 'flex-row gap-2'} pointer-events-none`}
+            id="google-maps-style-sidebar"
+            className="absolute top-4 left-4 z-[1000] pointer-events-none max-w-sm sm:max-w-md w-[calc(100%-32px)] flex flex-col gap-2.5"
           >
-            
-            {/* Quick Go-To Input field */}
-            <form 
-              id="form-quick-goto"
-              onSubmit={handleQuickGoTo} 
-              className={`flex items-center bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-xl shadow-lg border border-slate-200 pointer-events-auto ${isMobile ? 'w-full' : 'flex-1 max-w-sm sm:max-w-md'}`}
-            >
-              <MapIcon size={14} className="text-blue-500 mr-2 shrink-0 animate-bounce" />
-              <div className="flex-1 min-w-0">
-                <input 
-                  id="input-quick-goto"
-                  type="text" 
-                  value={quickCoordinatesInput}
+            {/* Unified Floating Search Bar Dashboard */}
+            <div className="bg-white rounded-2xl shadow-xl border border-slate-200/60 flex flex-col pointer-events-auto overflow-hidden transition-all duration-300 hover:shadow-2xl">
+              <div className="flex items-center px-4 py-3 gap-2">
+                <Search size={18} className="text-slate-400 shrink-0" />
+                <input
+                  id="google-search-input"
+                  type="text"
+                  value={searchQuery}
                   onChange={(e) => {
-                    setQuickCoordinatesInput(e.target.value);
-                    setQuickCoordinatesError('');
+                    setSearchQuery(e.target.value);
+                    setQuickCoordinatesInput(e.target.value); // Sync coordinates input as well
                   }}
-                  placeholder="หมุนค้นหาพิกัดด่วน เช่น 13.8095, 100.5605"
-                  className="w-full text-xs bg-transparent border-none outline-none focus:ring-0 text-slate-800 placeholder-slate-400 font-mono font-semibold"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      // If typing coords "lat, lng", execute quick goto
+                      if (/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(searchQuery.trim())) {
+                        handleQuickGoTo(e);
+                      }
+                    }
+                  }}
+                  placeholder="ค้นหาชื่อ, ตำบล, หมู่, ซอย หรือพิกัด..."
+                  className="flex-1 text-sm bg-transparent border-none outline-none text-slate-800 placeholder-slate-400 font-sans font-medium p-0 focus:ring-0"
                 />
-              </div>
-              
-              <button 
-                id="submit-quick-goto"
-                type="submit" 
-                className="ml-1 px-2.5 py-1.5 bg-slate-900 hover:bg-blue-600 text-white font-bold text-[10px] rounded-lg transition cursor-pointer"
-              >
-                บินไป
-              </button>
-            </form>
-
-            {/* Action buttons wrapper for auto-detect mobile layout */}
-            <div className={`flex gap-1.5 pointer-events-none ${isMobile ? 'justify-end w-full' : ''}`}>
-              
-              {/* GPS Tracker (Real-time) */}
-              <div id="gps-tracker-toggle" className="relative pointer-events-auto shrink-0 flex items-center justify-end">
-                <button 
-                  id="btn-acquire-location"
-                  type="button"
+                
+                {searchQuery && (
+                  <button
+                    onClick={() => {
+                      setSearchQuery('');
+                      setQuickCoordinatesInput('');
+                    }}
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
+                
+                <span className="w-[1px] h-6 bg-slate-200 mx-1"></span>
+                
+                <button
                   onClick={handleGetMyGPS}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl shadow-lg border font-bold text-xs cursor-pointer transition-all ${
+                  className={`p-1.5 rounded-xl transition-all duration-200 cursor-pointer ${
                     isLocating 
-                      ? 'bg-blue-600 text-white animate-pulse border-blue-400 shadow-blue-500/30' 
-                      : 'bg-white/95 backdrop-blur-md text-slate-700 border-slate-200 hover:text-blue-600'
+                      ? 'text-blue-600 bg-blue-50 border border-blue-100 shadow-sm' 
+                      : 'text-slate-400 hover:text-slate-600'
                   }`}
-                  title="ติดตามตำแหน่งปัจจุบันแบบ Real Time"
+                  title="หาตำแหน่งพิกัด GPS ปัจจุบันของคุณ"
                 >
-                  <Compass size={14} className={isLocating ? 'animate-spin' : 'text-blue-500'} />
-                  <span>{isLocating ? 'ปิดติดตามพิกัด' : 'พิกัด GPS ฉัน'}</span>
+                  <Compass size={18} className={isLocating ? 'animate-spin' : ''} />
                 </button>
               </div>
 
-              {/* Route Planning Toggle */}
-              <div id="route-planning-toggle" className="relative pointer-events-auto shrink-0 flex items-center justify-end">
-                <button 
-                  id="btn-toggle-route-mode"
-                  type="button"
-                  onClick={() => setIsRouteMode(!isRouteMode)}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl shadow-lg border font-bold text-xs cursor-pointer transition-all ${
-                    isRouteMode 
-                      ? 'bg-amber-500 text-white border-amber-600 shadow-amber-500/30' 
-                      : 'bg-white/95 backdrop-blur-md text-slate-700 border-slate-200 hover:text-amber-600'
-                  }`}
-                  title="วางแผนเส้นทางหลายจุด"
-                >
-                  <Navigation size={14} className={isRouteMode ? 'text-white' : 'text-amber-500'} />
-                  <span className="relative">
-                    วางแผนเส้นทาง
-                    {routePoints.length > 0 && (
-                      <span className="absolute -top-3 -right-3 bg-red-500 text-white text-[9px] w-4 h-4 flex items-center justify-center rounded-full border border-white">
-                        {routePoints.length}
-                      </span>
-                    )}
-                  </span>
-                </button>
-              </div>
+              {/* Instant Auto-Complete matching list inside Google Maps Search Box */}
+              {searchQuery && (
+                <div className="border-t border-slate-100 max-h-[240px] overflow-y-auto bg-white">
+                  {/* Match Coordinates Quick Jumper Action */}
+                  {/^-?\d+\.?\d*,\s*-?\d+\.?\d*$/.test(searchQuery.trim()) && (
+                    <button
+                      type="button"
+                      onClick={handleQuickGoTo}
+                      className="w-full text-left px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold transition-all flex items-center gap-2 cursor-pointer"
+                    >
+                      <Navigation size={14} className="animate-pulse" />
+                      <span>บินด่วนไปยังพิกัดพิกัด: {searchQuery}</span>
+                    </button>
+                  )}
 
+                  {/* Filtered existing bookmarks */}
+                  {filteredLocations.length > 0 ? (
+                    filteredLocations.slice(0, 5).map(loc => (
+                      <button
+                        key={loc.id}
+                        type="button"
+                        onClick={() => {
+                          setActiveLocationId(loc.id);
+                          setIsEditing(false);
+                          setIsCreating(false);
+                          handleMapFocus(loc.lat, loc.lng, 15);
+                        }}
+                        className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors flex items-center gap-3 border-b border-slate-100/40 last:border-b-0 cursor-pointer"
+                      >
+                        <span className="p-1.5 bg-slate-100 rounded-lg text-slate-600 scale-90">
+                          {getCategoryEmoji(loc.category)}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-bold text-slate-800 truncate">{loc.name}</p>
+                          <p className="text-[10px] text-slate-400 truncate">
+                            {loc.tambon ? `ต.${loc.tambon} ` : ''}
+                            {loc.amphoe ? `อ.${loc.amphoe} ` : ''}
+                            {loc.moo ? `ม.${loc.moo} ` : ''}
+                            ({loc.lat.toFixed(4)}, {loc.lng.toFixed(4)})
+                          </p>
+                        </div>
+                        <ChevronRight size={14} className="text-slate-300" />
+                      </button>
+                    ))
+                  ) : (
+                    <div className="py-4 text-center text-slate-400 text-xs font-medium">
+                      ไม่พบจุดบันทึกในช่วงคำค้นนี้
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
+            {/* Scrolling Horizontal Category Shortcut Chips Row */}
+            <div className="flex gap-1.5 overflow-x-auto py-1 scrollbar-none pointer-events-auto select-none no-scrollbar">
+              <button
+                type="button"
+                onClick={() => {
+                  setCategoryFilter('All');
+                  setTambonFilter('All');
+                  setMooFilter('All');
+                  setSearchQuery('');
+                }}
+                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border text-xs font-bold shadow-sm transition-all whitespace-nowrap cursor-pointer ${
+                  categoryFilter === 'All' && tambonFilter === 'All' && mooFilter === 'All' && searchQuery === ''
+                    ? 'bg-slate-900 border-slate-900 text-white'
+                    : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-600'
+                }`}
+              >
+                <span>🌐 ทุกจุด</span>
+              </button>
+
+              <button
+                type="button"
+                id="btn-map-playlist-shortcut"
+                onClick={() => {
+                  setShowPlaylistTodayModal(true);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-700 text-xs font-bold shadow-sm transition-all whitespace-nowrap cursor-pointer shrink-0"
+              >
+                <span>📅 คิวงานวันนี้</span>
+                <span className="bg-amber-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-black">
+                  {routePoints.length}
+                </span>
+              </button>
+              {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
+                const isActive = categoryFilter === cat;
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => {
+                      setCategoryFilter(isActive ? 'All' : cat);
+                    }}
+                    className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border text-xs font-bold shadow-sm transition-all whitespace-nowrap cursor-pointer ${
+                      isActive
+                        ? 'bg-blue-600 border-blue-600 text-white shadow-md'
+                        : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    <span>{getCategoryEmoji(cat)}</span>
+                    <span>{getCategoryNameTh(cat)}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Quick coordinates Go-To search feedback alert */}
           {quickCoordinatesError && (
-            <div id="quick-coords-error-alert" className="absolute top-16 left-4 z-[999] bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-lg animate-fadeIn flex items-center gap-1.5 pointer-events-auto">
+            <div id="quick-coords-error-alert" className="absolute top-32 left-4 z-[999] bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-semibold px-3 py-1.5 rounded-lg shadow-lg animate-fadeIn flex items-center gap-1.5 pointer-events-auto">
               <AlertCircle size={13} className="text-rose-500 shrink-0" />
               <span>{quickCoordinatesError}</span>
               <button id="close-quick-error" className="ml-2 hover:text-rose-900 cursor-pointer" onClick={() => setQuickCoordinatesError('')}>
@@ -2829,30 +3220,75 @@ export default function App() {
             </div>
           )}
 
-          {/* Tile Layer Selector */}
-          <div className="absolute top-4 right-4 z-[999] pointer-events-auto">
-            <div className="relative group">
-              <button className="bg-white/90 backdrop-blur-md p-2.5 rounded-xl shadow-lg border border-slate-200 text-slate-700 hover:text-blue-600 transition-colors flex items-center justify-center cursor-pointer">
-                <Layers size={20} />
+          {/* 2. GOOGLE MAPS STYLE FLOATING CONTROL CARD HUD (BOTTOM-RIGHT) */}
+          <div className="absolute bottom-8 right-4 z-[1000] flex flex-col gap-2.5 pointer-events-none">
+            
+            {/* Map Style Overlay Card Picker */}
+            <div className="relative group pointer-events-auto shadow-lg rounded-xl">
+              <button 
+                id="btn-google-layers-picker"
+                className="w-10 h-10 bg-white hover:bg-slate-50 border border-slate-200/80 rounded-xl text-slate-700 hover:text-blue-600 transition shadow flex items-center justify-center cursor-pointer"
+                title="เปลี่ยนรูปแบบแผนที่ดาวดาวเทียม/ถนน"
+              >
+                <Layers size={18} />
               </button>
-              <div className="absolute right-0 top-full mt-2 w-48 bg-white/95 backdrop-blur-xl rounded-xl shadow-2xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 transform origin-top-right overflow-hidden">
+              
+              {/* Flyout panel */}
+              <div className="absolute right-0 bottom-full mb-2 w-48 bg-white/95 backdrop-blur rounded-xl shadow-2xl border border-slate-200/60 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 transform origin-bottom-right overflow-hidden">
+                <div className="p-2 py-1.5 bg-slate-50 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100">
+                  สไตล์แผนที่
+                </div>
                 <div className="p-2 space-y-1">
                   {Object.entries(TILE_LAYERS).map(([key, style]) => (
                     <button
                       key={key}
                       onClick={() => setTileStyle(key as keyof typeof TILE_LAYERS)}
-                      className={`w-full text-left px-3 py-2 text-[11px] font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-2 ${
+                      className={`w-full text-left px-2.5 py-1.5 text-[11px] font-bold rounded-lg transition-all cursor-pointer flex items-center gap-2 ${
                         tileStyle === key 
-                          ? 'bg-blue-50 text-blue-600' 
+                          ? 'bg-blue-50 text-blue-600 font-bold' 
                           : 'hover:bg-slate-50 text-slate-600'
                       }`}
                     >
                       <div className={`w-2 h-2 rounded-full ${tileStyle === key ? 'bg-blue-600' : 'bg-slate-300'}`}></div>
-                      {style.name}
+                      <span>{style.name}</span>
                     </button>
                   ))}
                 </div>
               </div>
+            </div>
+
+            {/* Route Planning Mode Toggle widget */}
+            <button
+              id="btn-route-mode-floating-nav"
+              onClick={() => setIsRouteMode(!isRouteMode)}
+              className={`w-10 h-10 pointer-events-auto border rounded-xl shadow-lg flex items-center justify-center transition-all cursor-pointer ${
+                isRouteMode 
+                  ? 'bg-amber-500 border-amber-600 text-white hover:bg-amber-600 shadow-amber-200/50' 
+                  : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-705 text-amber-500'
+              }`}
+              title="วางแผนและคำนวณเส้นทางหลายจุด"
+            >
+              <Navigation size={18} className={isRouteMode ? 'rotate-45' : ''} />
+            </button>
+
+            {/* Glassmorphic custom zoom tools */}
+            <div className="bg-white rounded-xl border border-slate-200/80 shadow-lg flex flex-col pointer-events-auto overflow-hidden">
+              <button
+                id="btn-floating-zoom-in"
+                onClick={() => mapInstanceRef.current?.zoomIn()}
+                className="w-10 h-10 hover:bg-slate-50 text-slate-700 flex items-center justify-center border-b border-slate-100 text-lg font-semibold transition cursor-pointer"
+                title="ขยายแผนที่ Zoom In"
+              >
+                +
+              </button>
+              <button
+                id="btn-floating-zoom-out"
+                onClick={() => mapInstanceRef.current?.zoomOut()}
+                className="w-10 h-10 hover:bg-slate-50 text-slate-700 flex items-center justify-center text-lg font-semibold transition cursor-pointer"
+                title="ย่อแผนที่ Zoom Out"
+              >
+                −
+              </button>
             </div>
           </div>
 
@@ -3059,177 +3495,207 @@ export default function App() {
             </div>
           )}
 
-          {/* 2. Mobile Floating Panel: Active saved location information */}
-          {isMobile && mobileActiveTab === 'map' && activeLocation && !selectedMapPoint && (
-            <div id="mobile-floating-location-panel" className="absolute bottom-20 left-4 right-4 z-[999] bg-[#161720]/95 backdrop-blur-md rounded-2xl border border-slate-800 p-4 shadow-2xl flex flex-col gap-3 animate-slideUp text-white">
-              <div className="flex items-start justify-between">
-                <div className="space-y-1 max-w-[75%] min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm bg-slate-800 p-1.5 rounded-lg inline-block">{getCategoryEmoji(activeLocation.category)}</span>
-                    <span className="text-[9px] uppercase font-bold tracking-widest text-[#FF6B00] px-2 py-0.5 rounded-full bg-[#FF6B00]/10 border border-[#FF6B00]/20">
+          {/* 3. GOOGLE MAPS STYLE PREMIUM LOCATION DETAIL PANEL (BOTTOM-LEFT / BOTTOM-MIDDLE AUTO RESPONSIVE) */}
+          {activeLocation && !selectedMapPoint && (
+            <div 
+              id="google-maps-location-drawer" 
+              className={`absolute z-[999] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden animate-slideUp pointer-events-auto text-slate-800 transition-all duration-300 ${
+                isMobile 
+                  ? 'bottom-20 left-4 right-4 max-h-[70vh] overflow-y-auto' 
+                  : 'bottom-16 left-4 w-96 max-h-[64vh] overflow-y-auto'
+              }`}
+            >
+              {/* Category Gradient Header Banner Wallpaper */}
+              <div className={`relative h-28 shrink-0 flex items-end p-4 bg-gradient-to-r ${
+                activeLocation.category === 'Village' ? 'from-emerald-500 to-teal-600' :
+                activeLocation.category === 'Community' ? 'from-blue-500 to-indigo-600' :
+                activeLocation.category === 'Office' ? 'from-rose-500 to-red-600' :
+                'from-amber-500 to-orange-600'
+              }`}>
+                <div className="absolute top-3 right-3 flex gap-1 z-10">
+                  <button 
+                    onClick={() => handleStartEdit(activeLocation)} 
+                    className="p-1.5 bg-white/25 hover:bg-white/40 backdrop-blur rounded-lg text-white transition cursor-pointer"
+                    title="แก้ไขตำแหน่งพิกัดนี้"
+                  >
+                    <Edit3 size={13} />
+                  </button>
+                  <button 
+                    onClick={() => handleDeleteLocation(activeLocation.id)} 
+                    className="p-1.5 bg-white/25 hover:bg-rose-600/90 backdrop-blur rounded-lg text-white transition cursor-pointer"
+                    title="ลบจุดนี้ออก"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                  <button 
+                    onClick={() => setActiveLocationId(null)} 
+                    className="p-1.5 bg-white/25 hover:bg-white/45 backdrop-blur rounded-lg text-white transition cursor-pointer"
+                    title="ปิดหน้าต่าง"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2.5 relative z-10 text-white">
+                  <span className="text-2xl bg-white/10 backdrop-blur p-2 rounded-xl border border-white/20 shadow-sm flex items-center justify-center">
+                    {getCategoryEmoji(activeLocation.category)}
+                  </span>
+                  <div>
+                    <span className="text-[9px] uppercase font-bold tracking-widest text-white/95 bg-white/20 px-2.5 py-0.5 rounded-full border border-white/15">
                       {getCategoryNameTh(activeLocation.category)}
                     </span>
+                    <h3 className="text-sm font-bold truncate max-w-[240px] pt-1 leading-snug drop-shadow-sm text-white">
+                      {activeLocation.name}
+                    </h3>
                   </div>
-                  <h3 className="text-xs font-bold text-white truncate pt-1">{activeLocation.name}</h3>
-                  {userLocation && (
-                    <div className="text-[10px] font-bold text-emerald-400 mt-0.5 flex items-center gap-1">
-                      <Navigation size={10} className="text-emerald-400" />
-                      ห่างจากคุณ {(calculateDistanceKm(userLocation.lat, userLocation.lng, activeLocation.lat, activeLocation.lng) * 1000).toFixed(0)} เมตร
-                    </div>
-                  )}
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <p className="text-[10px] text-slate-400 font-mono bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700/50">
+                </div>
+              </div>
+
+              {/* Card Contents */}
+              <div className="p-4 space-y-3.5 select-text overflow-y-auto">
+                
+                {/* Distance status tracker indicator */}
+                {userLocation && (
+                  <div className="text-xs font-bold text-blue-600 bg-blue-50/75 border border-blue-100 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                    <Navigation size={12} className="text-blue-500 rotate-45 animate-pulse" />
+                    <span>ห่างจากพิกัดปักหมุด GPS ของคุณประมาณ {(calculateDistanceKm(userLocation.lat, userLocation.lng, activeLocation.lat, activeLocation.lng) * 1000).toFixed(0)} เมตร</span>
+                  </div>
+                )}
+
+                {/* Sub address attributes and coordinates copy block */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+                    <span className="text-xs font-mono font-bold text-slate-700">
                       {activeLocation.lat.toFixed(6)}, {activeLocation.lng.toFixed(6)}
-                    </p>
+                    </span>
                     <button
-                      id="btn-copy-coords-mobile"
                       onClick={() => {
                         navigator.clipboard.writeText(`${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`);
-                        showToast('คัดลอกพิกัดเรียบร้อยแล้ว!', 'success');
+                        showToast('คัดลอกคู่พิกัดเรียบร้อยแล้ว!', 'success');
                       }}
-                      className="p-1 bg-slate-800 text-slate-300 hover:text-white rounded border border-slate-700 transition cursor-pointer flex items-center justify-center"
+                      className="p-1 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-all cursor-pointer"
                       title="คัดลอกพิกัด"
                     >
-                      <Copy size={9} />
+                      <Copy size={12} />
                     </button>
                   </div>
+
+                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-1.5">
+                    <span className="text-[9px] font-bold text-slate-450 uppercase tracking-widest block font-sans">ข้อมูลรายละเอียดเชิงพื้นที่:</span>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-600 font-sans leading-relaxed">
+                      <div><span className="text-slate-400 font-medium">ซอย:</span> <span className="font-semibold text-slate-850">{activeLocation.soi || '-'}</span></div>
+                      <div><span className="text-slate-400 font-medium font-sans">หมู่ที่:</span> <span className="font-semibold text-slate-850">{activeLocation.moo || '-'}</span></div>
+                      <div className="col-span-2"><span className="text-slate-400 font-medium font-sans">ตำบล / ท้องถิ่น:</span> <span className="font-bold text-slate-850">{activeLocation.tambon || 'ไม่ได้ระบุ'}</span></div>
+                      <div className="col-span-2"><span className="text-slate-400 font-medium font-sans">อำเภอ:</span> <span className="font-bold text-slate-850">{activeLocation.amphoe || 'ไม่ได้ระบุ'}</span></div>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <button 
-                    id="mob-btn-edit-active"
-                    onClick={() => handleStartEdit(activeLocation)} 
-                    className="p-2 bg-slate-800 text-slate-300 hover:text-white rounded-lg border border-slate-700/80 hover:border-slate-605 transition cursor-pointer"
-                  >
-                    <Edit3 size={12} />
-                  </button>
-                  <button 
-                    id="mob-btn-delete-active"
-                    onClick={() => handleDeleteLocation(activeLocation.id)} 
-                    className="p-2 bg-slate-800 text-slate-400 hover:text-rose-500 rounded-lg border border-slate-700/80 hover:border-rose-905 transition cursor-pointer"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                  <button 
-                    id="mob-btn-close-active"
-                    onClick={() => setActiveLocationId(null)} 
-                    className="p-2 bg-slate-800 text-slate-400 hover:text-white rounded-lg transition cursor-pointer"
-                  >
-                    <X size={12} />
-                  </button>
+                {/* Main Dynamic Description / Notes */}
+                <div className="bg-amber-50/50 border border-amber-100 p-3 rounded-xl">
+                  <span className="text-[9px] font-bold text-amber-500 uppercase tracking-widest block mb-0.5 font-sans">บันทึกพิกัดจัดเก็บเพิ่มเติม:</span>
+                  <p className="text-xs text-amber-800/95 font-medium leading-relaxed italic">
+                    {activeLocation.notes ? `"${activeLocation.notes}"` : 'ไม่ได้ระบุประวัติหรือโน้ตสรุปเพิ่มเติมของพิกัดจัดเก็บชิ้นนี้'}
+                  </p>
                 </div>
-              </div>
 
-              {/* Detailed Thai Address subcomponents list */}
-              <div className="bg-slate-900/50 p-2.5 rounded-xl border border-slate-800 text-[11px] text-slate-300 font-sans space-y-1">
-                <p className="font-bold text-[9px] text-slate-500 uppercase tracking-widest">ข้อมูลที่อยู่ประเทศไทย:</p>
-                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-slate-300">
-                  <div><span className="text-slate-500">ซอย:</span> {activeLocation.soi || '-'}</div>
-                  <div><span className="text-slate-500">หมู่ที่:</span> {activeLocation.moo || '-'}</div>
-                  <div className="col-span-2"><span className="text-slate-500">ตำบล:</span> {activeLocation.tambon || '-'}</div>
-                </div>
-              </div>
-
-              {activeLocation.googleMapLink && (
-                <div className="text-[10px] leading-relaxed text-slate-300 bg-slate-900/50 p-2 rounded-xl border border-slate-800">
-                  <span className="font-bold text-[8px] text-slate-500 uppercase tracking-widest block mb-0.5">ลิงก์ Google Maps:</span>
+                {/* Action navigation buttons row in horizontal grid */}
+                <div className="grid grid-cols-2 gap-2 shrink-0">
+                  <button 
+                    onClick={() => {
+                      setRoutePoints(prev => {
+                        if (prev.find(p => p.id === activeLocation.id)) {
+                          showToast('พิกัดนี้อยู่ใน Playlist แล้ว', 'info');
+                          return prev;
+                        }
+                        showToast('เพิ่มพิกัดเข้า Playlist สำเร็จ!', 'success');
+                        return [...prev, activeLocation];
+                      });
+                    }}
+                    className="flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer text-center"
+                  >
+                    <Plus size={12} className="text-white shrink-0" />
+                    <span>บวก Playlist</span>
+                  </button>
+                  
                   <a 
-                    href={activeLocation.googleMapLink} 
-                    target="_blank" 
-                    rel="noopener noreferrer" 
-                    className="text-[#FF6B00] hover:underline font-bold block truncate max-w-full"
+                    href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer text-center"
                   >
-                    {activeLocation.googleMapLink}
+                    <Navigation size={12} className="shrink-0" />
+                    <span>นำทาง (Google Map)</span>
                   </a>
                 </div>
-              )}
 
-              {/* QR Code Sharing Block (Mobile Panel) */}
-              <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="font-bold text-[8px] text-slate-500 uppercase tracking-widest block">การแชร์และ QR Code:</span>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">
-                      {activeLocation.googleMapLink ? 'สแกนเพื่อเปิดบนอุปกรณ์อื่น' : 'นำทางด้วยพิกัดปักหมุด'}
-                    </span>
-                  </div>
-                  <button
-                    id="mob-btn-toggle-qr-code"
-                    type="button"
-                    onClick={() => setShowActiveQr(!showActiveQr)}
-                    className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
-                      showActiveQr 
-                        ? 'bg-[#FF6B00] text-white border-[#FF6B00] shadow-sm' 
-                        : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
-                    }`}
-                  >
-                    <QrCode size={11} />
-                    <span>{showActiveQr ? 'ปิดคิวอาร์' : 'แสดงคิวอาร์'}</span>
-                  </button>
-                </div>
-
-                <AnimatePresence>
-                  {showActiveQr && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      transition={{ duration: 0.2 }}
-                      className="overflow-hidden flex flex-col items-center justify-center pt-2.5 pb-1.5 bg-white rounded-lg"
-                    >
-                      {activeQrCodeUrl ? (
-                        <div className="flex flex-col items-center space-y-1.5 p-1 text-center text-slate-950 font-sans font-medium">
-                          <img 
-                            src={activeQrCodeUrl} 
-                            alt="Location QR Code" 
-                            className="w-28 h-28 object-contain select-none"
-                            referrerPolicy="no-referrer"
-                          />
-                          <div className="px-1.5">
-                            <p className="text-[9px] text-[#FF6B00] font-black">
-                              {activeLocation.googleMapLink ? '🗺️ ลิงก์สแกนเชื่อมแผนที่' : '📍 สแกนนำทางพิกัด'}
-                            </p>
-                            <p className="text-[8px] text-slate-500 max-w-[170px] truncate">
-                              {activeLocation.googleMapLink || `${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`}
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="py-3 text-[10px] text-slate-400 flex flex-col items-center gap-1">
-                          <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-[#FF6B00]"></div>
-                          <span>กำลังผลิตคิวอาร์...</span>
-                        </div>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {activeLocation.notes && (
-                <div className="text-[11px] leading-relaxed text-slate-350 bg-slate-900/50 p-2.5 rounded-xl italic">
-                  "{activeLocation.notes}"
-                </div>
-              )}
-
-              <div className="flex gap-2 mt-1">
+                {/* Integration with dynamic route scheduler tool! */}
                 <button
-                  id="mob-btn-flyto"
-                  onClick={() => handleMapFocus(activeLocation.lat, activeLocation.lng, 15)}
-                  className="flex-1 flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-750 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer"
+                  type="button"
+                  onClick={() => handleShareCard(activeLocation)}
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl shadow-sm transition cursor-pointer z-10 shrink-0"
                 >
-                  <Navigation size={12} className="text-[#FF6B00]" />
-                  <span>บินไปยังพิกัด</span>
+                  <Share2 size={12} className="text-[#FF6B00] shrink-0" />
+                  <span>แชร์ข้อมูลการ์ดทั้งใบ</span>
                 </button>
-                <a 
-                  id="mob-btn-external-navigate"
-                  href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 rounded-xl transition cursor-pointer text-center"
-                >
-                  <Navigation size={12} />
-                  <span>นำทาง (Google Map)</span>
-                </a>
+
+                {/* QR Code sharing section nested beautifully inside card */}
+                <div className="border border-slate-200 rounded-xl p-2.5 space-y-2 shrink-0">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-[8px] text-slate-400 uppercase tracking-widest block mb-0.5">แชร์พิกัดข้ามอุปกรณ์:</span>
+                      <span className="text-[10px] text-slate-500 font-medium block">
+                        สแกนนำทางตรงบนมือถือทันที
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowActiveQr(!showActiveQr)}
+                      className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
+                        showActiveQr 
+                          ? 'bg-[#FF6B00] text-white border-[#FF6B00] shadow' 
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <QrCode size={11} />
+                      <span>{showActiveQr ? 'ปิดคิวอาร์' : 'สแกน QR'}</span>
+                    </button>
+                  </div>
+
+                  <AnimatePresence>
+                    {showActiveQr && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="overflow-hidden flex flex-col items-center justify-center pt-2 pb-1 bg-white border border-slate-100 rounded-lg shadow-inner"
+                      >
+                        {activeQrCodeUrl ? (
+                          <div className="flex flex-col items-center space-y-1.5">
+                            <img 
+                              src={activeQrCodeUrl} 
+                              alt="Location QR Code" 
+                              className="w-24 h-24 object-contain select-none"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div className="px-2 text-center">
+                              <p className="text-[9px] text-[#FF6B00] font-black">
+                                {activeLocation.googleMapLink ? '🗺️ เปิดใน Google Maps' : '📍 นำทางตรงพิกัดปักหมุด'}
+                              </p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="py-3 text-[10px] text-slate-400 flex flex-col items-center gap-1">
+                            <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-[#FF6B00]"></div>
+                            <span>กำลังสร้างคิวอาร์แชร์...</span>
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
               </div>
             </div>
           )}
@@ -3662,6 +4128,131 @@ export default function App() {
                 className="w-full text-xs bg-slate-800 hover:bg-slate-750 text-white font-bold py-2 rounded-xl transition cursor-pointer"
               >
                 ปิดหน้านี้
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* 3.1 "คิวงานวันนี้" Today's Location Playlist Queue Modal */}
+      {showPlaylistTodayModal && (
+        <div id="playlist-today-modal-overlay" className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4 z-[1150] animate-fadeIn">
+          <div className="bg-[#14161E] border border-slate-800 rounded-[28px] max-w-lg w-full overflow-hidden shadow-2xl flex flex-col p-6 text-slate-200">
+            
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <span className="text-2xl select-none">📅</span>
+                <div>
+                  <h3 className="text-base font-bold text-white">คิวงานวันนี้ (Playlist)</h3>
+                  <p className="text-[11px] text-[#717688]">
+                    {userLocation ? '🟢 เรียงลำดับตามพิกัดจำลอง GPS ปัจจุบันที่ใกล้ที่สุดโดยอัตโนมัติ' : '⚠️ ปรับลำดับความเหมาะสมอัตโนมัติเมื่อเปิด GPS'}
+                  </p>
+                </div>
+              </div>
+              <button 
+                id="btn-close-playlist-today"
+                onClick={() => setShowPlaylistTodayModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-800 transition cursor-pointer font-sans"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* List agenda items */}
+            <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+              {routePoints.length === 0 ? (
+                <div className="text-center py-10 space-y-2">
+                  <span className="text-4xl block mb-2 opacity-60">📋</span>
+                  <p className="text-xs font-bold text-amber-500">ยังไม่มีข้อมูลคิวงานของวันนี้</p>
+                  <p className="text-[10px] text-slate-400 max-w-xs mx-auto">
+                    ท่านสามารถเพิ่มพิกัดตำแหน่งเข้าสู่คิวงานวันนี้ได้จากมุมมองรายละเอียดแผนที่ โดยคลิกปุ่ม "เพิ่มพิกัดเข้าในเครื่องมือเขียนเส้นทาง"
+                  </p>
+                </div>
+              ) : (
+                sortedPlaylistLocations.map((loc, idx) => {
+                  const distStr = userLocation && (loc as any).dist !== undefined 
+                    ? getDistanceString(userLocation.lat, userLocation.lng, loc.lat, loc.lng)
+                    : null;
+
+                  return (
+                    <div 
+                      key={loc.id} 
+                      className="flex items-start justify-between p-3.5 bg-[#1B1D26] border border-slate-800 rounded-xl hover:border-slate-700 transition"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                          <span className="text-xs font-black bg-slate-800 hover:bg-slate-700 text-white w-5 h-5 rounded-md flex items-center justify-center border border-slate-700">
+                            {idx + 1}
+                          </span>
+                          <span className="text-xs shrink-0">{getCategoryEmoji(loc.category)}</span>
+                          <span className="text-[9px] uppercase font-bold text-[#FF6B00] bg-[#FF6B00]/10 px-1.5 py-0.5 rounded border border-[#FF6B00]/20">
+                            {getCategoryNameTh(loc.category)}
+                          </span>
+                        </div>
+                        <h4 className="text-xs font-bold text-white truncate leading-snug">{loc.name}</h4>
+                        
+                        <div className="flex items-center gap-2 mt-1.5 text-[9px] text-[#7E8497] font-sans">
+                          <span>ต.{loc.tambon || '-'} อ.{loc.amphoe || '-'}</span>
+                          <span>•</span>
+                          <span className="font-mono">{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</span>
+                        </div>
+
+                        {distStr && (
+                          <div className="text-[10px] font-bold text-emerald-400 mt-1.5 flex items-center gap-1">
+                            <Navigation size={10} className="rotate-45 animate-pulse" /> 
+                            <span>ห่างจากคุณ {distStr} (ใกล้สุดอันดับ {idx + 1})</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="ml-3 flex items-center gap-1.5 self-center">
+                        <button
+                          onClick={() => {
+                            setShowPlaylistTodayModal(false);
+                            setCurrentView('map');
+                            setActiveLocationId(loc.id);
+                            handleMapFocus(loc.lat, loc.lng, 15);
+                          }}
+                          className="bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white p-1.5 rounded-lg transition cursor-pointer"
+                          title="บินไปตำแหน่งแผนที่"
+                        >
+                          <ChevronRight size={13} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setRoutePoints(prev => prev.filter(p => p.id !== loc.id));
+                            showToast('ลบรายการงานออกจากแผนจัดสรรคิวของวันนี้แล้ว', 'info');
+                          }}
+                          className="bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-400 p-1.5 rounded-lg transition cursor-pointer"
+                          title="ลบออกจากเพลลิสคิววันนี้"
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="mt-5 pt-3 border-t border-slate-800 flex justify-between items-center gap-2 font-sans text-xs">
+              {routePoints.length > 0 && (
+                <button
+                  onClick={() => {
+                    setRoutePoints([]);
+                    showToast('ล้างคิวงานวันนี้เรียบร้อยแล้ว', 'info');
+                  }}
+                  className="text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                >
+                  ล้างคิวทั้งหมด
+                </button>
+              )}
+              <button
+                onClick={() => setShowPlaylistTodayModal(false)}
+                className="px-6 py-2 bg-slate-800 hover:bg-slate-750 text-white font-bold rounded-xl transition cursor-pointer ml-auto"
+              >
+                ปิดหน้าต่าง
               </button>
             </div>
 
