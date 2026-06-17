@@ -60,15 +60,29 @@ body {
 
 /* Leaflet map popup style overrides because Leaflet uses standard absolute styles */
 .leaflet-popup-content-wrapper {
-  background: #111215 !important;
-  color: #f1f5f9 !important;
+  background: #ffffff !important;
+  color: #0f172a !important;
   border-radius: 16px !important;
   padding: 4px !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1) !important;
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.dark .leaflet-popup-content-wrapper {
+  background: #111215 !important;
+  color: #f1f5f9 !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
   box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3) !important;
 }
 
 .leaflet-popup-tip {
+  background: #ffffff !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.dark .leaflet-popup-tip {
   background: #111215 !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }

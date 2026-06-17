@@ -7,9 +7,11 @@ export interface BookmarkLocation {
   category: 'Village' | 'Community' | 'Office' | 'Condo';
   notes: string;
   googleMapLink?: string;
-  soi?: string;      // ซอย
-  moo?: string;      // หมู่ที่
-  tambon?: string;   // ตำบล/แขวง
-  amphoe?: string;   // เขต/อำเภอ
+  houseNumber?: string;  // บ้านเลขที่
+  soi?: string;         // ซอย
+  moo?: string;         // หมู่ที่
+  tambon?: string;      // ตำบล/แขวง
+  amphoe?: string;      // เขต/อำเภอ
   createdAt: number;
+  checkedInAt?: number; // Check-in timestamp
 }

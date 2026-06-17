@@ -1,0 +1,34 @@
+src/components/TableView.tsx:141:          {sortedData.map((loc) => {
+src/components/MapView.tsx:43:        {locations.map(loc => (
+src/App.tsx:302:        .map(l => ({
+src/App.tsx:333:      setRoutePoints(prev => prev.map(p => p.id === locId ? { ...p, checkedInAt: timestamp } : p));
+src/App.tsx:944:    const list = locations.map(l => l.tambon).filter(Boolean);
+src/App.tsx:949:    const list = locations.map(l => l.moo).filter(Boolean);
+src/App.tsx:1063:      const leafletMap = L.map(mapContainerRef.current, {
+src/App.tsx:1303:      .map(loc => [Number(loc.lat), Number(loc.lng), 0.5] as [number, number, number]);
+src/App.tsx:1319:    const currentIds = new Set(filteredLocations.map(l => l.id));
+src/App.tsx:1510:      .map(loc => [parseFloat(String(loc.lat)), parseFloat(String(loc.lng))] as [number, number])
+src/App.tsx:1556:        const coords = routePoints.map(p => `${p.lng},${p.lat}`).join(';');
+src/App.tsx:1570:          .map((c: [number, number]) => [Number(c[1]), Number(c[0])] as [number, number])
+src/App.tsx:1959:    const parts = cleanVal.split(/[,\/|]+/).map(p => p.trim()).filter(Boolean);
+src/App.tsx:2116:        setLocations(prev => prev.map(loc => loc.id === fallbackId ? newLoc : loc));
+src/App.tsx:2304:        .map(l => ({ 
+src/App.tsx:2759:                      {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
+src/App.tsx:2933:                            {NONTHABURI_TAMBONS.map((t) => (
+src/App.tsx:3339:                        {uniqueTambons.map(t => (
+src/App.tsx:3383:                          .map(m => (
+src/App.tsx:3406:                {['All', 'Village', 'Community', 'Office', 'Condo'].map(cat => {
+src/App.tsx:3500:                          return [...nonFiltered, ...filteredLocations.map(l => l.id)];
+src/App.tsx:3548:                          selectedObjects.map((loc, index) => {
+src/App.tsx:3590:                filteredLocations.map(loc => {
+src/App.tsx:3867:                    filteredLocations.slice(0, 5).map(loc => (
+src/App.tsx:3957:              {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
+src/App.tsx:4010:                  {Object.entries(TILE_LAYERS).map(([key, style]) => (
+src/App.tsx:4215:                {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
+src/App.tsx:4354:                        matchingDbLocations.map((loc) => {
+src/App.tsx:4406:                      {sortedPlaylistLocations.map((loc, idx) => {
+src/App.tsx:4484:                        const coords = sortedPlaylistLocations.map(p => `${p.lat},${p.lng}`).join('/');
+src/App.tsx:4902:                {(['Village', 'Community', 'Office', 'Condo'] as BookmarkLocation['category'][]).map(cat => {
+src/App.tsx:5070:                      {NONTHABURI_TAMBONS.map((t) => (
+src/App.tsx:5231:                queueLocations.map(loc => (
+src/App.tsx:5355:                  ].map((categoryItem, i) => {

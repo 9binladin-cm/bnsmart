@@ -1,0 +1,137 @@
+3:  MapPin, Search, Plus, Trash2, Edit3, Save, X, Compass, Map as MapIcon, Download, Upload, RotateCcw, Star, Check, Navigation, MapPinned, Sparkles, Lock, Unlock, Info, Layers, Heart, ChevronRight, ChevronUp, ChevronDown, Copy, LayoutDashboard, ClipboardList, BarChart2, Settings, CalendarDays, Calendar, Activity, CheckCircle2, FileCheck2, AlertCircle, QrCode, Building2, Home, Users, Clock, Share2, Eye
+13:import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
+51:    attribution: 'Map data: OSM'
+89:const StylizedMapPlaceholder = ({ emoji, category }: any) => {
+172:          <h2>Google Maps API Key Required</h2>
+344:          handleMapFocus(nextLoc.lat, nextLoc.lng, 17);
+377:      handleMapFocus(nearestUnchecked.lat, nearestUnchecked.lng, 17);
+390:  // Map settings state
+439:  const [mapCenter, setMapCenter] = useState<{lat: number, lng: number}>({lat: 13.7563, lng: 100.5018});
+440:  const [mapZoom, setMapZoom] = useState<number>(7);
+520:  const addRulerPoint = (lat: number, lng: number, mapInstance: L.Map) => {
+590:  const drawAreaGraphics = (mapInstance: L.Map) => {
+671:  const addAreaPoint = (lat: number, lng: number, mapInstance: L.Map) => {
+694:  const [selectedMapPoint, setSelectedMapPoint] = useState<{lat: number, lng: number} | null>(null);
+703:  const [formGoogleMapLink, setFormGoogleMapLink] = useState('');
+797:    const mapLink = loc.googleMapLink || `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+841:  const mapInstanceRef = useRef<L.Map | null>(null);
+891:          googleMapLink: data.googleMapsLink || '',
+1012:      // Use the Google Maps link if it exists, otherwise fall back to coordinates directions link
+1013:      const text = activeLocation.googleMapLink || `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`;
+1036:  }, [activeLocation?.id, activeLocation?.googleMapLink, activeLocation?.lat, activeLocation?.lng]);
+1047:  // 6. Map Initialization Effect
+1062:      // Build Map instance
+1063:      const leafletMap = L.map(mapContainerRef.current, {
+1078:      }).addTo(leafletMap);
+1083:      }).addTo(leafletMap);
+1086:      mapInstanceRef.current = leafletMap;
+1089:      const markersGroup = L.layerGroup().addTo(leafletMap);
+1093:      leafletMap.on('moveend', () => {
+1094:        const center = leafletMap.getCenter();
+1095:        setMapCenter({
+1101:      leafletMap.on('zoomend', () => {
+1102:        setMapZoom(leafletMap.getZoom());
+1106:      leafletMap.on('click', async (e: L.LeafletMouseEvent) => {
+1119:          addRulerPoint(clickedLat, clickedLng, leafletMap);
+1124:          addAreaPoint(clickedLat, clickedLng, leafletMap);
+1129:          setSelectedMapPoint({ lat: clickedLat, lng: clickedLng });
+1141:        setFormGoogleMapLink(`https://www.google.com/maps?q=${clickedLat},${clickedLng}`);
+1268:            ${loc.googleMapLink ? `
+1269:              <a href="${loc.googleMapLink}" target="_blank" rel="noopener noreferrer" class="flex items-center justify-center gap-1.5 text-[10px] bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 px-2 py-1.5 rounded-lg font-bold">
+1419:    if (selectedMapPoint) {
+1420:      const pLat = parseFloat(String(selectedMapPoint.lat));
+1421:      const pLng = parseFloat(String(selectedMapPoint.lng));
+1449:  }, [selectedMapPoint]);
+1619:  const handleMapFocus = (lat: any, lng: any, zoom = 14) => {
+1627:      console.warn('handleMapFocus received invalid coordinates:', lat, lng);
+1646:      console.error('Map flyTo failed:', err);
+1684:        handleMapFocus(myLat, myLng, 16);
+1759:  // Reverse geocoding tool using free OpenStreetMap Nominatim for Thai Address Details
+1827:          setSelectedMapPoint({ lat, lng });
+1835:          setFormGoogleMapLink('');
+1895:        setFormGoogleMapLink(`https://www.google.com/maps?q=${latVal},${lngVal}`);
+1921:        setSelectedMapPoint({ lat: inputLat, lng: inputLng });
+1922:        handleMapFocus(inputLat, inputLng, 14);
+1932:        setFormGoogleMapLink('');
+1982:    setSelectedMapPoint(null);
+1990:    setFormGoogleMapLink(loc.googleMapLink || '');
+2071:      googleMapsLink: formGoogleMapLink.trim(),
+2107:        googleMapLink: formGoogleMapLink.trim() || undefined,
+2125:    setSelectedMapPoint(null);
+2135:    handleMapFocus(roundedLat, roundedLng, 14);
+2142:    setSelectedMapPoint(null);
+2143:    setFormGoogleMapLink('');
+2207:                googleMapLink: item.googleMapLink || undefined,
+2258:      setSelectedMapPoint(null);
+2262:      // Recenter Map
+2280:    const withLink = locations.filter(l => !!l.googleMapLink).length;
+2299:  // Locations scheduled on "Today's queue" list (All locations without Google Maps link)
+2301:    const withoutLinks = locations.filter(l => !l.googleMapLink);
+2404:                  setSelectedMapPoint(null);
+2411:                  setFormGoogleMapLink('');
+2421:                   <MapPin size={24} className="stroke-[2px]"/>
+2434:                   <MapIcon size={24} className="stroke-[2px]"/>
+2559:      {/* 2. Interactive Map Screen (Visible when currentView === 'map') */}
+2605:                    <MapPinned size={11} />
+2644:                    <MapPinned size={11} />
+2683:                  <MapPinned size={14} />
+2728:                {selectedMapPoint && (
+2791:                      <MapPin size={13} className="text-[#FF6B00]" />
+2969:                  {/* Add Google Maps Link input */}
+2972:                      กรอก Link GoogleMap
+2977:                      value={formGoogleMapLink}
+2978:                      onChange={(e) => setFormGoogleMapLink(e.target.value)}
+3018:                        href={formGoogleMapLink ? formGoogleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${formLat},${formLng}`}
+3024:                        <span>นำทาง (Map)</span>
+3054:                          setSelectedMapPoint(null);
+3074:                        setSelectedMapPoint(null);
+3166:                        {activeLocation.googleMapLink ? 'สแกนคิวอาร์ลิ้งค์แผนที่' : 'สแกนคิวอาร์คู่พิกัดพอร์ตสำเร็จ'}
+3172:                          const text = activeLocation.googleMapLink || `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`;
+3208:                                {activeLocation.googleMapLink ? '🗺️ ลิงก์แผนที่หลัก' : '📍 พิกัดสำลองนำทาง'}
+3211:                                {activeLocation.googleMapLink || `${activeLocation.lat.toFixed(6)}, ${activeLocation.lng.toFixed(6)}`}
+3234:                {/* Fly maps directly button & Map navigation */}
+3257:                      href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
+3263:                      <span>นำทาง (Google Map)</span>
+3426:                          <span className="flex items-center gap-1.5"><MapPin size={14} /> <span>ทั้งหมด</span></span>
+3550:                            return `${index + 1}. ${getCategoryEmoji(loc.category)} ${loc.name}\n📍 พิกัด: ${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}\n📮 ที่อยู่: ${addr || '-'}\n📝 โน้ต: ${loc.notes || '-'}\n🌐 แผนที่: ${loc.googleMapLink || `https://www.google.com/maps?q=${loc.lat},${loc.lng}`}`;
+3604:                        handleMapFocus(loc.lat, loc.lng, 14);
+3628:                        {/* Map Preview Thumbnail */}
+3631:                          <StylizedMapPlaceholder emoji={getCategoryEmoji(loc.category)} category={loc.category} />
+3633:                          {/* Map preview image from calculated OSM tile on top of placeholder */}
+3637:                              alt="Map Preview"
+3659:                            {loc.googleMapLink ? (
+3661:                                <MapIcon className="w-2.5 h-2.5" /> ลิงก์แมป
+3699:                              handleMapFocus(loc.lat, loc.lng, 15);
+3763:                setSelectedMapPoint(null);
+3770:                setFormGoogleMapLink('');
+3776:                handleMapFocus(13.7563, 100.5018, 10);
+3850:              {/* Instant Auto-Complete matching list inside Google Maps Search Box */}
+3875:                          handleMapFocus(loc.lat, loc.lng, 15);
+3994:            {/* Map Style Overlay Card Picker */}
+4060:                    handleMapFocus(userLocation.lat, userLocation.lng, 16);
+4184:                  <MapPin size={12} />
+4447:                                  <MapPin size={12} /> เช็คอิน
+4458:                                  handleMapFocus(loc.lat, loc.lng, 17);
+4490:                      เปิดนำทาง Google Maps ทั้งหมด
+4517:              <span className="text-emerald-400">STAGE:</span> Leaflet OpenStreetMap Interactive
+4522:          {isMobile && mobileActiveTab === 'map' && selectedMapPoint && (
+4531:                  <p className="text-[10px] text-slate-400 font-mono">{selectedMapPoint.lat.toFixed(6)}, {selectedMapPoint.lng.toFixed(6)}</p>
+4535:                  onClick={() => setSelectedMapPoint(null)}
+4547:                  setFormLat(selectedMapPoint.lat);
+4548:                  setFormLng(selectedMapPoint.lng);
+4549:                  setFormCoords(`${selectedMapPoint.lat.toFixed(6)}, ${selectedMapPoint.lng.toFixed(6)}`);
+4552:                  setFormGoogleMapLink('');
+4569:            {activeLocation && !selectedMapPoint && (
+4701:                    {activeLocation.checkedInAt ? <CheckCircle2 size={14} /> : <MapPin size={14} />}
+4723:                    href={activeLocation.googleMapLink ? activeLocation.googleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${activeLocation.lat},${activeLocation.lng}`}
+4795:                                {activeLocation.googleMapLink ? '🗺️ เปิดใน Google Maps' : '📍 นำทางตรงพิกัดปักหมุด'}
+4828:              <MapIcon size={20} />
+4863:                <MapPinned size={18} />
+4934:                <MapPin size={14} className="text-[#FF6B00]" />
+5107:            {/* Add Google Maps Link input */}
+5110:                กรอก Link GoogleMap
+5115:                value={formGoogleMapLink}
+5116:                onChange={(e) => setFormGoogleMapLink(e.target.value)}
+5156:                  href={formGoogleMapLink ? formGoogleMapLink : `https://www.google.com/maps/dir/?api=1&destination=${formLat},${formLng}`}
+5272:                          handleMapFocus(loc.lat, loc.lng, 15);
+5354:                    { label: 'คอนโด (Condo)', value: statsSummary.categoriesCount.Condo || 0, color: 'bg-amber-500', icon: <MapPinned size={14} className="text-amber-500 mr-1.5 inline" /> },
